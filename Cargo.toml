@@ -1,0 +1,11 @@
+[package]
+name = "llm-rs"
+version = "0.1.0"
+edition = "2024"
+authors = ["phildav"]
+
+[dependencies]
+glob = "0.3.2"
+
+[lib]
+path = "src/lib.rs"

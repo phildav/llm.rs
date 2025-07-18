@@ -34,3 +34,8 @@ dev/cuda/global_norm
 
 # log files
 *.log
+
+
+# Added by cargo
+
+/target
