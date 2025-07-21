@@ -354,7 +354,6 @@ impl GPT2 {
         if let Some(targets) = opt_targets {
             targets.iter().for_each(|&target| assert!((0..V).contains(&(target as usize))));
         }
-        
 
         // allocate space for all the activations if needed (done here, lazily)
         if self.acts_memory.is_none() {
@@ -382,7 +381,7 @@ impl GPT2 {
             let residual = if l == 0 { 
                 &mut acts.encoded 
             } else {
-                &mut acts.residual3[(l-1) * B * T * C..]
+                &mut acts.residual3[(l-1) * B * T * C .. l * B * T * C]
             };
 
             // get the pointers of the weights for this layer
@@ -428,10 +427,9 @@ impl GPT2 {
             gelu_forward(l_fch_gelu, l_fch, B*T*4*C);
             matmul_forward(l_fcproj, l_fch_gelu, l_fcprojw, Some(l_fcprojb), B, T, 4*C, C);
             {
-                let l_residual3 = &mut acts.residual3[l * B * T * C .. ];
+                let l_residual3 = &mut acts.residual3[l * B * T * C .. (l+1)*B*T*C];
                 residual_forward(l_residual3, l_residual2, l_fcproj, B*T*C);
-            }
-            
+            } 
         }
 
         let residual = &acts.residual3[(L-1) * B * T * C .. ];  // last residual is in residual3
@@ -1246,9 +1244,7 @@ fn main() {
         model.update(1e-4, 0.9, 0.999, 1e-8, 0.0, step+1);
         let end = Instant::now();
         let elapsed = end - start;
-        println!("step {}: train loss {} (took {:?} ms)", step, model.mean_loss, elapsed.as_millis());
-        
-        
+        println!("step {}: train loss {} (took {:?} ms)", step, model.mean_loss, elapsed.as_millis());        
     }
 
 

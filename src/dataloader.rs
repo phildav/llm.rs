@@ -3,7 +3,9 @@ use glob::glob;
 use std::path::PathBuf;
 use std::io::{BufReader, Seek, SeekFrom};
 use core::mem::size_of;
+use rand_mt::Mt;
 
+use crate::random::{init_identity_permutation, random_permutation};
 use crate::utils::{read_fill_le_u16_array, read_le_u32_array};
 
 
@@ -23,7 +25,11 @@ pub struct Dataloader {
     tokens_file: Option<BufReader<File>>,
     // data buffers
     buffer: Vec<u32>, // we fread data from file into this buffer
-
+    // random shuffle related variables
+    shuffle_rng: Option<Mt>,
+    should_shuffle: bool,
+    shard_indices: Option<Vec<usize>>,
+    intra_shard_indices: Option<Vec<usize>>,
     // sizes in bytes
     total_batch_size_bytes: usize,  // total across all processes
     local_batch_offset_bytes: usize,  // inner-sample offset for this process
@@ -34,11 +40,10 @@ pub struct Dataloader {
 impl Dataloader {
 
     #[allow(non_snake_case)]
-    pub fn new(file_pattern: &str, B: usize, T: usize, _should_shuffle: bool) -> Self {
+    pub fn new(file_pattern: &str, B: usize, T: usize, should_shuffle: bool) -> Self {
 
-        let num_processes = 1;
+        let num_processes: usize = 1;
         let process_rank = 0;
-        
 
         let files: Vec<PathBuf> = glob(file_pattern)
             .expect("Error: failed to glob pattern")
@@ -48,6 +53,15 @@ impl Dataloader {
         if files.is_empty() {
             panic!("Error: no files found matching the pattern: {}", file_pattern);
         }
+
+        let (shuffle_rng, shard_indices) =  if should_shuffle {
+            let shuffle_rng = Mt::new(42 + process_rank as u32);
+            let mut shard_indices = vec![0usize;files.len()];
+            init_identity_permutation(&mut shard_indices);
+            (Some(shuffle_rng), Some(shard_indices))
+        } else {
+            (None, None)
+        };
 
         // allocate all the space we'll need
         let buffer = vec![0u32; B * T +1];
@@ -62,7 +76,11 @@ impl Dataloader {
             current_sample_idx: 0,
             tokens_file: None,
             buffer,
-            header_bytes: HEADER_SIZE * std::mem::size_of::<u16>(),
+            shuffle_rng,
+            should_shuffle,
+            shard_indices,
+            intra_shard_indices: None,
+            header_bytes: HEADER_SIZE * std::mem::size_of::<u32>(),
             total_batch_size_bytes: num_processes * B * T * std::mem::size_of::<u16>(),
             local_batch_offset_bytes: process_rank * B * T * std::mem::size_of::<u16>(),
         };
@@ -72,15 +90,16 @@ impl Dataloader {
         let mut ntok_total: usize = 0;
         for shard_index in 0..dataloader.files.len() {
             let shard_ntok = dataloader.load_shard(shard_index);
-
+            // we need at least one batch/shard, the way things are written right now.
+            // can be relaxed a lot later.
+            assert!(shard_ntok >= num_processes * B * T + 1);
             ntok_total += shard_ntok;
         }
-
         println!("DataLoader: filename_pattern: {}", file_pattern);
         println!("DataLoader: Found {} tokens across {} shards\n", ntok_total, dataloader.files.len());
-
-        
         dataloader.num_tokens = ntok_total;
+
+        dataloader.reset();
 
         dataloader        
     }
@@ -94,13 +113,29 @@ impl Dataloader {
         self.current_sample_idx += 1;
     }
 
+    fn prepare_intra_shard_indices(&mut self){
+        // shuffle the examples inside the shards
+        let mut intra_shard_indices = vec![0usize; self.shard_num_samples];
+        let shuffle_rng = self.shuffle_rng.as_mut().unwrap();
+        init_identity_permutation(&mut intra_shard_indices);
+        random_permutation(&mut intra_shard_indices, self.shard_num_samples, shuffle_rng);
+        self.intra_shard_indices = Some(intra_shard_indices);
+    }
+
     pub fn reset(&mut self) {
         self.current_shard_idx = 0;
         self.current_sample_idx = 0;
 
-        // TODO handle shuffling
+        if self.should_shuffle {
+            let shuffle_rng = self.shuffle_rng.as_mut().unwrap();
+            let shard_indices = self.shard_indices.as_mut().unwrap();
+            random_permutation(shard_indices, self.files.len(), shuffle_rng);
+        }
         self.load_shard(self.current_shard_idx);
 
+        if self.should_shuffle {
+            self.prepare_intra_shard_indices();
+        }
     }
 
     /// expose inputs as a non mutable slice of buffer
@@ -114,7 +149,11 @@ impl Dataloader {
     }
 
     fn load_shard(&mut self, shard_index: usize) -> usize {
-        // TODO add shuffling
+        let mut shard_index = shard_index;
+        if self.should_shuffle {
+            let shard_indices = self.shard_indices.as_ref().unwrap();
+            shard_index = shard_indices[shard_index];
+        }
 
         let filename = &self.files[shard_index];
 
@@ -162,13 +201,20 @@ impl Dataloader {
         self.current_sample_idx = 0;
         self.load_shard(self.current_shard_idx);
 
-        // TODO handdle shuffle
+        if self.should_shuffle {
+            self.prepare_intra_shard_indices();
+        }
     }
 
     fn load_batch(&mut self) {
+        assert!(!self.should_shuffle || self.intra_shard_indices.is_some());
         assert!(self.current_sample_idx < self.shard_num_samples);
 
-        let idx = self.current_sample_idx;
+        let idx = if self.should_shuffle { 
+            self.intra_shard_indices.as_ref().unwrap()[self.current_sample_idx]
+        } else {
+            self.current_sample_idx
+        };
         let global_batch_offset_bytes = idx * self.total_batch_size_bytes;
         let current_offset = self.header_bytes + global_batch_offset_bytes + self.local_batch_offset_bytes;
 

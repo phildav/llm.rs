@@ -1,0 +1,5 @@
+[build]
+rustflags = [
+  "-C", "opt-level=3",           # Highest optimization, roughly -O3/-Ofast
+  "-C", "target-cpu=native",     # Use all instructions for local CPU, like -march=native
+]
