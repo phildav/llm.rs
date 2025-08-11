@@ -37,5 +37,10 @@ dev/cuda/global_norm
 
 
 # Added by cargo
-
 /target
+
+# python
+__pycache__
+
+# macOS
+.DS_Store
