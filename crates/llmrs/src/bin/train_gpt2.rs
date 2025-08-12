@@ -1,6 +1,5 @@
 use std::{fs::File, io::BufReader, time::Instant};
 use llm_rs::{dataloader::Dataloader, tokenizer::Tokenizer, utils::{read_fill_le_f32_array, read_le_u32_array}};
-use rayon::prelude::*;
 
 
 #[derive(Debug)]
@@ -350,9 +349,6 @@ impl GPT2 {
         let NH = self.config.num_heads;
         let C = self.config.channels;
 
-        type MatmulFn = fn(&mut [f32], &[f32], &[f32], Option<&[f32]>, usize, usize, usize, usize);
-        let matmul_forward: MatmulFn = matmul_forward_unroll_rayon;
-
         // validate inputs, all indices must be in the range [0, V)
         inputs.iter().for_each(|&input| assert!((input as usize) < V));
         if let Some(targets) = opt_targets {
@@ -484,10 +480,6 @@ impl GPT2 {
         let L = self.config.num_layers;
         let NH = self.config.num_heads;
         let C = self.config.channels;
-
-        // Pick a matmut_backward implementation
-        type MatmulBackFn = fn(&mut [f32], &mut [f32], Option<&mut [f32]>, & [f32], &[f32], &[f32], usize, usize, usize, usize);
-        let matmul_backward: MatmulBackFn = matmul_backward_rayon;
 
         // backward pass: go in the reverse order of the forward pass, and call backward() functions
 
@@ -830,44 +822,6 @@ fn matmul_forward(out: &mut [f32],
     }
 }
 
-#[allow(non_snake_case)]
-fn matmul_forward_unroll_rayon(out: &mut [f32], 
-                               inp: &[f32], weight: &[f32], bias: Option<&[f32]>,
-                               B: usize, T: usize, C: usize, OC: usize) {
-    const LOOP_UNROLL: usize = 8;
-    let BT = B * T;
-    if BT % LOOP_UNROLL != 0 {
-        panic!("cannot use LOOP_UNROLL on BT={}", BT);
-    }
-
-    out.par_chunks_mut(LOOP_UNROLL*OC)
-        .enumerate()
-        .for_each(|(tile_idx, out_tile) | {
-            for o in 0..OC {
-                let mut result = [0.0f32; LOOP_UNROLL];
-                // Initialize with bias if present
-                if let Some(bias_vec) = bias {
-                    for ibt in 0..LOOP_UNROLL {
-                        result[ibt] = bias_vec[o];
-                    }
-                }
-                // Main multiply-accumulate
-                for i in 0..C {
-                    let w = weight[i + o * C];
-                    for ibt in 0..LOOP_UNROLL {
-                        let bt = tile_idx*LOOP_UNROLL + ibt;
-                        result[ibt] += inp[bt * C + i] * w;
-                    }
-                }
-                // Write back results
-                for ibt in 0..LOOP_UNROLL {
-                    out_tile[ibt * OC + o] = result[ibt];
-                }
-            }
-        });
-
-}
-
 
 #[allow(non_snake_case)]
 fn matmul_backward(dinp: &mut [f32], dweight: &mut [f32], mut dbias: Option<&mut [f32]>,
@@ -908,57 +862,6 @@ fn matmul_backward(dinp: &mut [f32], dweight: &mut [f32], mut dbias: Option<&mut
                     dwrow[i] += inp_bt[i] * d;
                 }
             }
-        }
-    }
-}
-
-#[allow(non_snake_case)]
-fn matmul_backward_rayon(dinp: &mut [f32], dweight: &mut [f32], mut dbias: Option<&mut [f32]>,
-                         dout: &[f32], inp: &[f32], weight: &[f32],
-                         B: usize, T: usize, C: usize, OC: usize ) {
-
-    // most of the running time is spent here and in matmul_forward
-    // this backward could be done in a single "round" of loops
-    // but that doesn't afford an efficient parallelization strategy
-
-    // backward into inp first, parallelize over B,T
-    // dinp (B, T, C) = dout (B, T, OC) @ weigth (OC, C)
-    dinp.par_chunks_mut(C)
-        .enumerate()
-        .for_each(|(bt, dinp_bt)| {
-            let dout_bt = &dout[bt*OC .. (bt+1)*OC];
-            for o in 0..OC {
-                let wrow = &weight[o*C .. o*C + C];
-                let d = dout_bt[o];
-                for i in 0..C {
-                    dinp_bt[i] += wrow[i] * d;
-                }
-            }
-        });
-
-    // backward into weight/bias, parallelize over output channels OC
-    // dweight (OC, C) = dout (B, T, OC) .T() @ inp (B, T, C)
-    let threads_results = dweight.par_chunks_mut(C)
-        .enumerate()
-        .map(|(o, dwrow)| {
-            let mut dbias_acc = 0.0;
-            for b in 0..B {
-                for t in 0..T {
-                    let inp_row = &inp[b*T*C + t*C .. b*T*C + t*C + C];
-                    let d = dout[b*T*OC + t*OC + o];
-                    dbias_acc += d;
-                    for i in 0..C {
-                        dwrow[i] += inp_row[i] * d;
-                    }
-                }
-            }
-
-            (o, dbias_acc)
-        }).collect::<Vec<_>>();
-
-    if let Some(dbias) = dbias.as_mut() {
-        for (o, acc) in threads_results {
-            dbias[o] += acc;
         }
     }
 }
