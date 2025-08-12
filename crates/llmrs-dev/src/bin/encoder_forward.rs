@@ -80,7 +80,7 @@ fn main() -> CudaResult<()> {
             );
         }
         
-        validate_result(&d_out, &out_cpu, "out", B*T*C, tol);
+        validate_result_floatX(&d_out, &out_cpu, "out", B*T*C, tol);
     }
     
     println!("All results match. Starting benchmarks.\n");
@@ -88,6 +88,8 @@ fn main() -> CudaResult<()> {
     // Benchmark with CUDA Events (cust)
     for &bs in &block_sizes {
         let repeat = 1000;
+        
+        // Measure total wall time
         let elapsed_time = benchmark_kernel(repeat, || {
             unsafe {
                 encoder_forward(

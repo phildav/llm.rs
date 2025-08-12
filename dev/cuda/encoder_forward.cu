@@ -201,6 +201,7 @@ int main(int argc, char **argv) {
     cudaCheck(cudaMemcpy(d_inp, inp, B * T * sizeof(int), cudaMemcpyHostToDevice));
     cudaCheck(memcpy_convert(d_wte, wte, V * C));
     cudaCheck(memcpy_convert(d_wpe, wpe, T * C));
+    
 
     // read kernel_num from command line
     int kernel_num = 2;

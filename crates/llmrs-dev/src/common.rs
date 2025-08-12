@@ -1,7 +1,7 @@
 use rand::{Rng, SeedableRng};
 use cust::prelude::*;
-use cust::memory::DeviceCopy;
-use bytemuck::Zeroable;
+use cust::device::DeviceAttribute;
+use std::any::TypeId;
 
 // Newtype wrappers to implement required traits
 #[cfg(feature = "bf16")]
@@ -9,9 +9,12 @@ use bytemuck::Zeroable;
 #[derive(Copy, Clone, Debug)]
 pub struct Bf16(pub half::bf16);
 
-
+#[cfg(feature = "bf16")]
+use cust::memory::DeviceCopy;
 #[cfg(feature = "bf16")]
 unsafe impl DeviceCopy for Bf16 {}
+#[cfg(feature = "bf16")]
+use bytemuck::Zeroable;
 #[cfg(feature = "bf16")]
 unsafe impl Zeroable for Bf16 {}
 
@@ -21,7 +24,11 @@ unsafe impl Zeroable for Bf16 {}
 pub struct F16(pub half::f16);
 
 #[cfg(feature = "fp16")]
+use cust::memory::DeviceCopy;
+#[cfg(feature = "fp16")]
 unsafe impl DeviceCopy for F16 {}
+#[cfg(feature = "fp16")]
+use bytemuck::Zeroable;
 #[cfg(feature = "fp16")]
 unsafe impl Zeroable for F16 {}
 
@@ -65,12 +72,23 @@ pub fn zero_floatx() -> FloatX {
     { 0.0f32 }
 }
 
-pub fn validate_result(device_result: &DeviceBuffer<FloatX>, cpu_reference: &[f32], name: &str, num_elements: usize, tolerance: f32) {
+#[allow(non_snake_case)]
+pub fn validate_result_floatX(device_result: &DeviceBuffer<FloatX>, cpu_reference: &[f32], name: &str, num_elements: usize, tolerance: f32) {
     let mut out_gpu = vec![zero_floatx(); num_elements];
     cust::context::CurrentContext::synchronize().unwrap();
     device_result.copy_to(&mut out_gpu).unwrap();
     let out_gpu_f32 = floatx_to_f32(&out_gpu);
+    validate_result(&out_gpu_f32, cpu_reference, name, tolerance);
+}
 
+pub fn validate_result_f32(device_result: &DeviceBuffer<f32>, cpu_reference: &[f32], name: &str, num_elements: usize, tolerance: f32) {
+    let mut out_gpu = vec![0f32; num_elements];
+    cust::context::CurrentContext::synchronize().unwrap();
+    device_result.copy_to(&mut out_gpu).unwrap();
+    validate_result(&out_gpu, cpu_reference, name, tolerance);
+}
+
+pub fn validate_result(result: &[f32], cpu_reference: &[f32], name: &str, tolerance: f32) {
     // Set epsilon based on feature flags, similar to C++ version
     #[cfg(feature = "bf16")]
     let epsilon = 0.079f32;
@@ -80,7 +98,7 @@ pub fn validate_result(device_result: &DeviceBuffer<FloatX>, cpu_reference: &[f3
     // Use iterator to find mismatches with early termination
     let faults: Vec<_> = cpu_reference
         .iter()
-        .zip(out_gpu_f32.iter())
+        .zip(result.iter())
         .enumerate()
         .filter_map(|(i, (&cpu_val, &gpu_val))| {
             // Skip masked elements (non-finite values)
@@ -128,12 +146,10 @@ where
     use cust::stream::Stream;
     
     // Get current device and create a stream for operations
-    let _device = cust::device::Device::get_device(0)?;
+    let device = cust::device::Device::get_device(0)?;
     let stream = Stream::new(cust::stream::StreamFlags::DEFAULT, None)?;
     
-    // For L2 cache size, we'll use a reasonable default since cust doesn't expose l2_cache_size
-    // Most modern GPUs have 6-40MB L2 cache, so we'll use 32MB as a safe default
-    let l2_cache_size = 32 * 1024 * 1024; // 32MB
+    let l2_cache_size = device.get_attribute(DeviceAttribute::L2CacheSize)? as usize;
     let mut flush_buffer = DeviceBuffer::<u8>::zeroed(l2_cache_size)?;
     
     // Create CUDA events for timing
@@ -142,11 +158,10 @@ where
     
     let mut elapsed_time = 0.0f32;
     
+
     for _ in 0..repeats {
-        // Clear L2 cache by memsetting the flush buffer
-        // We'll use a simple memset operation to clear the buffer
-        let zero_buffer = vec![0u8; l2_cache_size];
-        flush_buffer.copy_from(&zero_buffer)?;
+        // Clear L2 cache by memsetting the flush buffer        
+        flush_buffer.set_zero()?;
         
         // Record start time
         start_event.record(&stream)?;
@@ -167,7 +182,7 @@ where
     }
     
     // Return average time
-    Ok(elapsed_time / repeats as f32)
+    Ok(elapsed_time / (repeats as f32))
 }
 
 
