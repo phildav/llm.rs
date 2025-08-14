@@ -16,7 +16,7 @@ __device__ float lerp(float start, float end, float weight) {
 }
 
 template <typename Tp, typename Tg>
-__device__ void adamw_update(Tp* params_memory, float* master_params_memory, Tg* grads_memory, float* m_memory, float* v_memory, size_t num_parameters,
+__device__ void adamw_update_kernel(Tp* params_memory, float* master_params_memory, Tg* grads_memory, float* m_memory, float* v_memory, size_t num_parameters,
                              float learning_rate, float beta1, float beta2, float beta1_correction, float beta2_correction, float eps, float weight_decay,
                              float grad_scale, unsigned int seed) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -51,7 +51,7 @@ __global__ void adamw_kernel3(Tp* params_memory, float* master_params_memory, Tg
                               ptrdiff_t w_stride, ptrdiff_t g_stride, ptrdiff_t s_stride,
                               float learning_rate, float beta1, float beta2, float beta1_correction, float beta2_correction, float eps, float weight_decay,
                               float grad_scale, unsigned int seed) {
-    adamw_update(params_memory + blockIdx.y * w_stride,
+    adamw_update_kernel(params_memory + blockIdx.y * w_stride,
                  master_params_memory ? master_params_memory + blockIdx.y * s_stride : NULL,
                  grads_memory + blockIdx.y * g_stride,
                  m_memory + blockIdx.y * s_stride,
@@ -71,8 +71,8 @@ __global__ void init_from_master_kernel(Tp* params_memory, float* master_params_
     stochastic_rounding(master_params_memory[idx], &params_memory[idx], seed);
 }
 
-template <typename Tp, typename Tg>
-void adamw_update(Tp* params_memory, float* master_params_memory, Tg* grads_memory, float* m_memory, float* v_memory, size_t num_parameters,
+extern "C" {
+void adamw_update(floatX* params_memory, float* master_params_memory, floatX* grads_memory, float* m_memory, float* v_memory, size_t num_parameters,
                   ptrdiff_t w_stride, ptrdiff_t g_stride, ptrdiff_t s_stride,  int num_slices, float learning_rate, float beta1, float beta2, int t, float eps, float weight_decay,
                   float grad_scale, unsigned int seed, cudaStream_t stream) {
     // AdamW update
@@ -87,8 +87,7 @@ void adamw_update(Tp* params_memory, float* master_params_memory, Tg* grads_memo
     cudaCheck(cudaGetLastError());
 }
 
-template <typename Tp>
-void init_from_master(Tp* params_memory, float* master_params_memory, size_t num_parameters,
+void init_from_master(floatX* params_memory, float* master_params_memory, size_t num_parameters,
                         ptrdiff_t w_stride, ptrdiff_t s_stride, int num_slices, unsigned int seed, cudaStream_t stream) {
     int block_size = 512; // must match block size of adamw_update so that RNG also matches
     int num_blocks = CEIL_DIV(num_parameters, block_size);
@@ -96,3 +95,5 @@ void init_from_master(Tp* params_memory, float* master_params_memory, size_t num
                              (params_memory, master_params_memory, num_parameters, w_stride, s_stride, seed);
     cudaCheck(cudaGetLastError());
 }
+
+} // extern "C"

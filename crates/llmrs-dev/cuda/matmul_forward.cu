@@ -25,7 +25,7 @@ OMP_NUM_THREADS=32 ./matmul_forward 3
 
 // ----------------------------------------------------------------------------
 // CPU code reference
-
+extern "C" {
 void matmul_forward_cpu(float* out,
                     const float* inp, const float* weight, const float* bias,
                     int B, int T, int C, int OC) {
@@ -48,6 +48,7 @@ void matmul_forward_cpu(float* out,
         }
     }
 }
+} // extern "C"
 
 // ----------------------------------------------------------------------------
 // GPU kernels
@@ -315,6 +316,9 @@ void matmul_forward4(float* out,
     cudaCheck(cudaGetLastError());
 }
 
+// C-ABI dispatcher exported by the .cu (linked by build.rs)
+extern "C" {
+
 // kernel version dispatch
 void matmul_forward(int kernel_num,
                     float* out,
@@ -340,41 +344,25 @@ void matmul_forward(int kernel_num,
     }
 }
 
-// C-ABI dispatcher exported by the .cu (linked by build.rs)
-extern "C" {
-    void matmul_forward_cpu_wrapper(float* out,
-                                   const float* inp, const float* weight, const float* bias,
-                                   int B, int T, int C, int OC) {
-        matmul_forward_cpu(out, inp, weight, bias, B, T, C, OC);
-    }
+void cublas_init() {
+    int deviceIdx = 0;
+    cudaCheck(cudaSetDevice(deviceIdx));
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, deviceIdx);
+    printf("Device %d: %s\n", deviceIdx, deviceProp.name);
 
-    void matmul_forward_wrapper(int kernel_num,
-                               float* out,
-                               const float* inp, const float* weight, const float* bias,
-                               int B, int T, int C, int OC,
-                               const int sqrt_block_size) {
-
-        matmul_forward(kernel_num, out, inp, weight, bias, B, T, C, OC, sqrt_block_size);
-    }
-
-    void cublas_init() {
-        int deviceIdx = 0;
-        cudaCheck(cudaSetDevice(deviceIdx));
-        cudaDeviceProp deviceProp;
-        cudaGetDeviceProperties(&deviceProp, deviceIdx);
-        printf("Device %d: %s\n", deviceIdx, deviceProp.name);
-
-        // setup cuBLAS and cuBLASLt
-        cublasCheck(cublasCreate(&cublas_handle));
-        cublasCheck(cublasLtCreate(&cublaslt_handle));
-        // TF32 precision is equivalent to torch.set_float32_matmul_precision('high')
-        int enable_tf32 = deviceProp.major >= 8 ? 1 : 0;
-        printf("enable_tf32: %d\n", enable_tf32);
-        cublas_compute_type = enable_tf32 ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F;
-        cublasMath_t cublas_math_mode = enable_tf32 ? CUBLAS_TF32_TENSOR_OP_MATH : CUBLAS_DEFAULT_MATH;
-        cublasCheck(cublasSetMathMode(cublas_handle, cublas_math_mode));
-        // setup the (global) cuBLASLt workspace
-        cudaCheck(cudaMalloc(&cublaslt_workspace, cublaslt_workspace_size));
-        fflush(stdout);
-    }
+    // setup cuBLAS and cuBLASLt
+    cublasCheck(cublasCreate(&cublas_handle));
+    cublasCheck(cublasLtCreate(&cublaslt_handle));
+    // TF32 precision is equivalent to torch.set_float32_matmul_precision('high')
+    int enable_tf32 = deviceProp.major >= 8 ? 1 : 0;
+    printf("enable_tf32: %d\n", enable_tf32);
+    cublas_compute_type = enable_tf32 ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F;
+    cublasMath_t cublas_math_mode = enable_tf32 ? CUBLAS_TF32_TENSOR_OP_MATH : CUBLAS_DEFAULT_MATH;
+    cublasCheck(cublasSetMathMode(cublas_handle, cublas_math_mode));
+    // setup the (global) cuBLASLt workspace
+    cudaCheck(cudaMalloc(&cublaslt_workspace, cublaslt_workspace_size));
+    fflush(stdout);
 }
+
+} // extern "C"

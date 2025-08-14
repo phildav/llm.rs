@@ -1,0 +1,81 @@
+# Makefile for building CUDA kernels as a library for Rust linking
+# This provides better control over nvcc flags and visibility into the compilation process
+
+# Find nvcc (NVIDIA CUDA compiler)
+NVCC := $(shell which nvcc 2>/dev/null)
+ifeq ($(NVCC),)
+		$(error nvcc not found.)
+endif
+
+# Get target directory from environment (set by build.rs)
+TARGET_DIR ?= .
+
+ifneq ($(CI),true) # if not in CI, then use the GPU query
+  ifndef GPU_COMPUTE_CAPABILITY # set to defaults if: make GPU_COMPUTE_CAPABILITY=
+    GPU_COMPUTE_CAPABILITY = $(shell __nvcc_device_query) # assume if NVCC is present, then this likely is too
+    GPU_COMPUTE_CAPABILITY := $(strip $(GPU_COMPUTE_CAPABILITY))
+  endif
+endif
+
+# Compiler flags
+ifeq ($(GPU_COMPUTE_CAPABILITY),) # set to defaults if: make GPU_COMPUTE_CAPABILITY=
+  CFLAGS = -O3 --use_fast_math
+else
+  CFLAGS = -O3 --use_fast_math --generate-code arch=compute_$(GPU_COMPUTE_CAPABILITY),code=[compute_$(GPU_COMPUTE_CAPABILITY),sm_$(GPU_COMPUTE_CAPABILITY)]
+endif
+
+# Add dtype defines if environment variables are set
+ifdef ENABLE_BF16
+  CFLAGS += -DENABLE_BF16
+endif
+
+ifdef ENABLE_FP16
+  CFLAGS += -DENABLE_FP16
+endif
+
+NVCCFLAGS = -lcublas -lcublasLt -std=c++17
+
+# List all CUDA source files
+CUDA_SOURCES = $(wildcard *.cu)
+CUDA_OBJECTS = $(addprefix $(TARGET_DIR)/,$(CUDA_SOURCES:.cu=.o))
+
+# Default target: build the library
+all: check-target-dir $(TARGET_DIR)/libllmrs_kernels.a
+
+# Check that TARGET_DIR is properly set
+check-target-dir:
+ifeq ($(TARGET_DIR),.)
+		$(error TARGET_DIR not set. This Makefile should be called from build.rs)
+endif
+
+# Build individual object files in target directory
+$(TARGET_DIR)/%.o: %.cu
+	@echo "Compiling $< with nvcc..."
+	@echo "Command: $(NVCC) $(CFLAGS) $(NVCCFLAGS) -c $< -o $@"
+	$(NVCC) $(CFLAGS) $(NVCCFLAGS) -c $< -o $@
+
+# Create static library in target directory
+$(TARGET_DIR)/libllmrs_kernels.a: $(CUDA_OBJECTS)
+	@echo "Creating static library $@..."
+	ar rcs $@ $^
+
+# Show compilation flags
+show-flags:
+	@echo "NVCC: $(NVCC)"
+	@echo "TARGET_DIR: $(TARGET_DIR)"
+	@echo "CFLAGS: $(CFLAGS)"
+	@echo "NVCCFLAGS: $(NVCCFLAGS)"
+	@echo "CUDA_SOURCES: $(CUDA_SOURCES)"
+	@echo "CUDA_OBJECTS: $(CUDA_OBJECTS)"
+	@echo ""
+	@echo "Actual nvcc commands that will be used:"
+	@for src in $(CUDA_SOURCES); do \
+		echo "$(NVCC) $(CFLAGS) $(NVCCFLAGS) -c $$src -o $(TARGET_DIR)/$${src%.cu}.o"; \
+	done
+
+# Clean up - clean both local and target directory
+clean:
+	rm -f *.o *.a
+	rm -f $(TARGET_DIR)/*.o $(TARGET_DIR)/libllmrs_dev_kernels.a
+
+.PHONY: all check-target-dir show-flags clean

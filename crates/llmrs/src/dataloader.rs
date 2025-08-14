@@ -233,3 +233,106 @@ impl Dataloader {
 
 
 } 
+
+/// Dummy EvalLoader for multiple-choice evaluation datasets (e.g. HellaSwag)
+/// This is a placeholder implementation that matches the C interface
+pub struct EvalLoader {
+    // Configuration
+    pub process_rank: i32,
+    pub num_processes: i32,
+    pub B: usize,
+    pub T: usize,
+    
+    // File handling
+    pub eval_file: Option<std::fs::File>,
+    pub num_examples: i32,
+    
+    // Batch management
+    pub num_batches: i32,
+    pub start_example_index: i32,
+    pub end_example_index: i32,
+    pub current_example_index: i32,
+    
+    // Data buffers
+    pub buffer: Vec<u16>,
+    pub inputs: Vec<i32>,
+    pub targets: Vec<i32>,
+    pub mask: Vec<u8>,
+    pub label: Vec<i32>,
+    
+    // Constants
+    pub num_completions: i32,
+}
+
+impl Default for EvalLoader {
+    fn default() -> Self {
+        Self {
+            process_rank: 0,
+            num_processes: 1,
+            B: 1,
+            T: 1024,
+            eval_file: None,
+            num_examples: 0,
+            num_batches: 0,
+            start_example_index: 0,
+            end_example_index: 0,
+            current_example_index: 0,
+            buffer: Vec::new(),
+            inputs: Vec::new(),
+            targets: Vec::new(),
+            mask: Vec::new(),
+            label: Vec::new(),
+            num_completions: 4, // ASSUMED_NUM_COMPLETIONS from C code
+        }
+    }
+}
+
+impl EvalLoader {
+    /// Initialize the EvalLoader with file and configuration
+    pub fn init(&mut self, filename: &str, B: usize, T: usize, process_rank: i32, num_processes: i32) {
+        self.process_rank = process_rank;
+        self.num_processes = num_processes;
+        self.B = B;
+        self.T = T;
+        
+        // Dummy implementation - just set some placeholder values
+        self.num_examples = 1000; // placeholder
+        self.num_batches = 10; // placeholder
+        
+        // Allocate buffers
+        let can_fit_examples = (B / self.num_completions as usize).max(1);
+        self.buffer = vec![0u16; 1024]; // placeholder size
+        self.inputs = vec![0i32; B * T];
+        self.targets = vec![0i32; B * T];
+        self.mask = vec![0u8; B * T];
+        self.label = vec![0i32; can_fit_examples];
+        
+        self.reset();
+    }
+    
+    /// Reset the EvalLoader to start from the beginning
+    pub fn reset(&mut self) {
+        // Dummy implementation - just reset indices
+        self.current_example_index = self.start_example_index;
+    }
+    
+    /// Load the next batch of examples
+    pub fn next_batch(&mut self) {
+        // Dummy implementation - just increment example index
+        self.current_example_index += 1;
+        if self.current_example_index >= self.end_example_index {
+            self.current_example_index = self.start_example_index;
+        }
+    }
+    
+    /// Calculate statistics from losses and return number of correct predictions
+    pub fn stat_losses(&self, losses: &[f32]) -> i32 {
+        // Dummy implementation - return random correct count
+        (self.num_examples / 4) as i32 // placeholder: 25% accuracy
+    }
+    
+    /// Free resources (no-op in Rust due to RAII)
+    pub fn free(&mut self) {
+        // Rust handles cleanup automatically
+    }
+} 

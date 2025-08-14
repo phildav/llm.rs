@@ -4,10 +4,23 @@ version = "0.1.0"
 edition = "2024"
 authors = ["phildav"]
 
+[features]
+default = []
+cuda = []     # compile cuda/*.cu
+bf16 = []
+fp16 = []
+
 [dependencies]
 glob = "0.3.2"
 rand_mt = "5.0.0"
+rand = "0.8.5"
 rayon = "1.10.0"
+cust = "0.3.2"
+
+
+half = "2.6.0"
+bytemuck = "1.23.2"
+clap = { version = "4.0", features = ["derive"] }
 
 [profile.release]
 opt-level = 3
