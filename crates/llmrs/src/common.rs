@@ -69,6 +69,33 @@ pub static PRECISION_MODE: PrecisionMode = PrecisionMode::from_features();
 #[cfg(feature = "fp16")] pub type FloatX = F16;
 #[cfg(all(not(feature = "bf16"), not(feature = "fp16")))] pub type FloatX = f32;
 
+// Trait for converting to f32
+pub trait ToF32 {
+    fn to_f32(&self) -> f32;
+}
+
+// Implement ToF32 for each concrete type that FloatX can be
+#[cfg(feature = "bf16")]
+impl ToF32 for FloatX {
+    fn to_f32(&self) -> f32 {
+        self.0.to_f32()
+    }
+}
+
+#[cfg(feature = "fp16")]
+impl ToF32 for FloatX {
+    fn to_f32(&self) -> f32 {
+        self.0.to_f32()
+    }
+}
+
+#[cfg(all(not(feature = "bf16"), not(feature = "fp16")))]
+impl ToF32 for FloatX {
+    fn to_f32(&self) -> f32 {
+        *self
+    }
+}
+
 
 pub fn f32_to_floatx(v: &[f32]) -> Vec<FloatX> {
     #[cfg(feature = "bf16")] { v.iter().copied().map(|x| Bf16(half::bf16::from_f32(x))).collect() }
@@ -77,9 +104,7 @@ pub fn f32_to_floatx(v: &[f32]) -> Vec<FloatX> {
 }
 
 pub fn floatx_to_f32(v: &[FloatX]) -> Vec<f32> {
-    #[cfg(feature = "bf16")] { v.iter().map(|x| x.0.to_f32()).collect() }
-    #[cfg(feature = "fp16")] { v.iter().map(|x| x.0.to_f32()).collect() }
-    #[cfg(all(not(feature="bf16"), not(feature="fp16")))] { v.to_vec() }
+    v.iter().map(|x| x.to_f32()).collect()
 }
 
 pub fn zero_floatx() -> FloatX {

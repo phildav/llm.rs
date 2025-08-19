@@ -5,27 +5,12 @@ use std::f32::consts::PI;
 pub struct LearningRateScheduler {
     /// Type of scheduler: "cosine", "linear", "constant", "wsd"
     pub scheduler_type: String,
-    /// Base learning rate
     pub learning_rate: f32,
-    /// Number of warmup iterations
     pub warmup_iterations: i32,
-    /// Total number of training batches
     pub train_num_batches: i32,
-    /// Final learning rate as a fraction of the base learning rate
     pub final_learning_rate_frac: f32,
 }
 
-impl Default for LearningRateScheduler {
-    fn default() -> Self {
-        Self {
-            scheduler_type: "cosine".to_string(),
-            learning_rate: 3e-4,
-            warmup_iterations: 0,
-            train_num_batches: 1000,
-            final_learning_rate_frac: 1.0,
-        }
-    }
-}
 
 impl LearningRateScheduler {
     /// Create a new learning rate scheduler
@@ -45,39 +30,40 @@ impl LearningRateScheduler {
         }
     }
 
-    /// Get the learning rate for a given step using cosine scheduling
+    /// cosine: warmup linearly to max LR, then cosine decay to LR * final_learning_rate_frac
     pub fn get_learning_rate_cosine(&self, step: i32) -> f32 {
-        let mut lr = self.learning_rate;
+        let lr;
         if step < self.warmup_iterations {
             lr = self.learning_rate * ((step + 1) as f32) / self.warmup_iterations as f32;
         } else {
             let decay_ratio = ((step - self.warmup_iterations) as f32) 
                 / (self.train_num_batches - self.warmup_iterations) as f32;
-            debug_assert!(0.0 <= decay_ratio && decay_ratio <= 1.0);
+            assert!(0.0 <= decay_ratio && decay_ratio <= 1.0);
             let coeff = 0.5 * (1.0 + (PI * decay_ratio).cos()); // coeff starts at 1 and goes to 0
-            debug_assert!(0.0 <= coeff && coeff <= 1.0);
+            assert!(0.0 <= coeff && coeff <= 1.0);
             let min_lr = self.learning_rate * self.final_learning_rate_frac;
             lr = min_lr + coeff * (self.learning_rate - min_lr);
         }
         lr
     }
 
-    /// Get the learning rate for a given step using linear scheduling
+    /// linear: warmup linearly to max LR, then decay linearly to LR * final_learning_rate_frac
     pub fn get_learning_rate_linear(&self, step: i32) -> f32 {
-        let mut lr = self.learning_rate;
+        let lr ;
         if step < self.warmup_iterations {
             lr = self.learning_rate * ((step + 1) as f32) / self.warmup_iterations as f32;
         } else {
             let decay_ratio = ((step - self.warmup_iterations) as f32) 
                 / (self.train_num_batches - self.warmup_iterations) as f32;
-            debug_assert!(0.0 <= decay_ratio && decay_ratio <= 1.0);
+            assert!(0.0 <= decay_ratio && decay_ratio <= 1.0);
             let min_lr = self.learning_rate * self.final_learning_rate_frac;
             lr = self.learning_rate - decay_ratio * (self.learning_rate - min_lr);
         }
         lr
     }
 
-    /// Get the learning rate for a given step using constant scheduling
+    /// wsd schedule: warmup linearly, keep constant, last 20% decay using 1 - sqrt decay to final_frac (should be 0.0)
+    /// https://arxiv.org/abs/2405.18392
     pub fn get_learning_rate_constant(&self, _step: i32) -> f32 {
         self.learning_rate
     }
@@ -103,7 +89,7 @@ impl LearningRateScheduler {
         lr
     }
 
-    /// Get the learning rate for a given step based on the scheduler type
+    /// return the learning rate at a given step
     pub fn get_learning_rate(&self, step: i32) -> f32 {
         match self.scheduler_type.as_str() {
             "cosine" => self.get_learning_rate_cosine(step),
@@ -122,6 +108,18 @@ impl LearningRateScheduler {
 mod tests {
     use super::*;
 
+    /// Helper function to compare floating-point values with a hardcoded tolerance
+    fn assert_approx_eq(actual: f32, expected: f32) {
+        const TOLERANCE: f32 = 1e-6;
+        assert!(
+            (actual - expected).abs() < TOLERANCE,
+            "Expected {} to be approximately equal to {} (tolerance: {})",
+            actual,
+            expected,
+            TOLERANCE
+        );
+    }
+
     #[test]
     fn test_constant_scheduler() {
         let scheduler = LearningRateScheduler::new("constant", 0.001, 0, 100, 1.0);
@@ -134,9 +132,9 @@ mod tests {
     fn test_cosine_scheduler() {
         let scheduler = LearningRateScheduler::new("cosine", 0.001, 10, 100, 0.1);
         // During warmup
-        assert_eq!(scheduler.get_learning_rate(0), 0.0001);
-        assert_eq!(scheduler.get_learning_rate(5), 0.0006);
-        assert_eq!(scheduler.get_learning_rate(10), 0.001);
+        assert_approx_eq(scheduler.get_learning_rate(0), 0.0001);
+        assert_approx_eq(scheduler.get_learning_rate(5), 0.0006);
+        assert_approx_eq(scheduler.get_learning_rate(10), 0.001);
         // After warmup, should decay
         let lr_50 = scheduler.get_learning_rate(50);
         assert!(lr_50 < 0.001 && lr_50 > 0.0001);
@@ -146,9 +144,9 @@ mod tests {
     fn test_linear_scheduler() {
         let scheduler = LearningRateScheduler::new("linear", 0.001, 10, 100, 0.1);
         // During warmup
-        assert_eq!(scheduler.get_learning_rate(0), 0.0001);
-        assert_eq!(scheduler.get_learning_rate(5), 0.0006);
-        assert_eq!(scheduler.get_learning_rate(10), 0.001);
+        assert_approx_eq(scheduler.get_learning_rate(0), 0.0001);
+        assert_approx_eq(scheduler.get_learning_rate(5), 0.0006);
+        assert_approx_eq(scheduler.get_learning_rate(10), 0.001);
         // After warmup, should decay linearly
         let lr_50 = scheduler.get_learning_rate(50);
         assert!(lr_50 < 0.001 && lr_50 > 0.0001);

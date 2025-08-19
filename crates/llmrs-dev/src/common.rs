@@ -1,7 +1,6 @@
 use rand::{Rng, SeedableRng};
 use cust::prelude::*;
 use cust::device::DeviceAttribute;
-use std::any::TypeId;
 
 // Newtype wrappers to implement required traits
 #[cfg(feature = "bf16")]
@@ -14,9 +13,13 @@ use cust::memory::DeviceCopy;
 #[cfg(feature = "bf16")]
 unsafe impl DeviceCopy for Bf16 {}
 #[cfg(feature = "bf16")]
-use bytemuck::Zeroable;
+use bytemuck::{Zeroable, NoUninit, AnyBitPattern};
 #[cfg(feature = "bf16")]
 unsafe impl Zeroable for Bf16 {}
+#[cfg(feature = "bf16")]
+unsafe impl NoUninit for Bf16 {}
+#[cfg(feature = "bf16")]
+unsafe impl AnyBitPattern for Bf16 {}
 
 #[cfg(feature = "fp16")]
 #[repr(transparent)]
@@ -28,9 +31,13 @@ use cust::memory::DeviceCopy;
 #[cfg(feature = "fp16")]
 unsafe impl DeviceCopy for F16 {}
 #[cfg(feature = "fp16")]
-use bytemuck::Zeroable;
+use bytemuck::{Zeroable, NoUninit, AnyBitPattern};
 #[cfg(feature = "fp16")]
 unsafe impl Zeroable for F16 {}
+#[cfg(feature = "fp16")]
+unsafe impl NoUninit for F16 {}
+#[cfg(feature = "fp16")]
+unsafe impl AnyBitPattern for F16 {}
 
 // ----- pick FloatX to match the .cu build flags -----
 #[cfg(feature = "bf16")] pub type FloatX = Bf16;

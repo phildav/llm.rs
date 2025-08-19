@@ -154,6 +154,7 @@ __global__ void wpe_backward_kernel(floatX* dwpe,
 // ----------------------------------------------------------------------------
 // kernel launchers
 
+extern "C" {
 void encoder_forward(floatX* out,
                      const int* inp, const floatX* wte, const floatX* wpe,
                      int B, int T, int C, cudaStream_t stream) {
@@ -231,4 +232,6 @@ void encoder_backward(floatX* dwte, floatX* dwpe, floatX* scratch, // gpu output
     // todo - profile block sizes on more content (depends on number of buckets and on GPU?)
     wte_backward_kernel<256><<<num_buckets, 256, 0, stream>>>(dwte, d_bucket_info, d_workload_indices, dout, inp, seed, B, T, C);
     cudaCheck(cudaGetLastError());
+}
+
 }

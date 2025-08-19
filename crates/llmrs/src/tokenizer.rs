@@ -6,7 +6,7 @@ use std::io::Read;
 pub struct Tokenizer {
     _vocab_size: u32,
     token_table: Vec<String>,
-    pub eot_token: u32
+    pub eot_token: i32
 }
 
 impl Tokenizer {
@@ -25,7 +25,7 @@ impl Tokenizer {
         assert_eq!(header[0], 20240328);
         let version: u32 = header[1];
         let vocab_size: u32 = header[2];
-        let eot_token: u32;
+        let eot_token: i32;
         match version {
             1 => {
                 // version 1 didn't include the EOT token id
@@ -34,7 +34,7 @@ impl Tokenizer {
                 eot_token = 50256;
             }
             2 => {
-                eot_token = header[3];
+                eot_token = header[3] as i32;
             }
             _ => {
                 panic!("Tokenizer model file {} has bad version: {}", filename, version);
@@ -43,12 +43,13 @@ impl Tokenizer {
 
         // read in all the tokens
         let mut token_table: Vec<String> = Vec::new();
-        for _i in 0..vocab_size {
+        for _ in 0..vocab_size {
             let mut len = [0u8];
             file.read_exact(&mut len).expect("Failed to read token length");
-            assert!(len[0] > 0); // every token should be at least one character
+            let len = len[0];
+            assert!(len > 0); // every token should be at least one character
 
-            let mut token_bytes = vec![0u8; len[0] as usize];
+            let mut token_bytes = vec![0u8; len as usize];
             file.read_exact(&mut token_bytes).expect("Failed to read token");
 
             let token = match String::from_utf8(token_bytes) {
@@ -65,7 +66,7 @@ impl Tokenizer {
         }
     }
 
-    pub fn decode(&self, token_id: u32) -> String {
+    pub fn decode(&self, token_id: i32) -> String {
         self.token_table[token_id as usize].clone()
         
     }

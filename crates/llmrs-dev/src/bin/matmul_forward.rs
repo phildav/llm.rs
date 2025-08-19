@@ -2,8 +2,7 @@ use cust::prelude::*;
 use cust::error::CudaResult;
 use llmrs_dev::common::*;
 
-#[allow(non_snake_case)]
-fn matmul_forward_cpu(out: &mut [f32], inp: &[f32], weight: &[f32], bias: &[f32], B: usize, T: usize, C: usize, OC: usize) {
+fn matmul_forward_cpu_rs(out: &mut [f32], inp: &[f32], weight: &[f32], bias: &[f32], B: usize, T: usize, C: usize, OC: usize) {
     // OC is short for "output channels"
     // inp is (B,T,C), weight is (OC, C), bias is (OC)
     // out will be (B,T,OC)
@@ -25,7 +24,7 @@ fn matmul_forward_cpu(out: &mut [f32], inp: &[f32], weight: &[f32], bias: &[f32]
 
 // C-ABI dispatcher exported by the .cu (linked by build.rs)
 unsafe extern "C" {
-    fn matmul_forward_cpu_wrapper(
+    fn matmul_forward_cpu(
         out: *mut f32,
         inp: *const f32,
         weight: *const f32,
@@ -33,7 +32,7 @@ unsafe extern "C" {
         B: i32, T: i32, C: i32, OC: i32,
     );
 
-    fn matmul_forward_wrapper(
+    fn matmul_forward(
         kernel_num: i32,
         out: *mut f32,
         inp: *const f32,
@@ -74,7 +73,7 @@ fn main() -> CudaResult<()> {
     println!("Using kernel {}", kernel_num);
 
     // first check the correctness of the kernel
-    matmul_forward_cpu(&mut out_cpu, &inp, &weight, &bias, B, T, C, OC);
+    matmul_forward_cpu_rs(&mut out_cpu, &inp, &weight, &bias, B, T, C, OC);
 
     // time the kernel at different block sizes
     let sqrt_block_sizes = [4, 8, 16, 32];
@@ -83,7 +82,7 @@ fn main() -> CudaResult<()> {
     for &sqrt_block_size in &sqrt_block_sizes {
         println!("Checking block size {} x {}", sqrt_block_size, sqrt_block_size);
         unsafe {
-            matmul_forward_wrapper(
+            matmul_forward(
                 kernel_num,
                 d_out.as_device_ptr().as_raw() as *mut f32,
                 d_inp.as_device_ptr().as_ptr(),
@@ -106,7 +105,7 @@ fn main() -> CudaResult<()> {
         // Measure total wall time
         let elapsed_time = benchmark_kernel(repeat, || {
             unsafe {
-                matmul_forward_wrapper(
+                matmul_forward(
                     kernel_num,
                     d_out.as_device_ptr().as_raw() as *mut f32,
                     d_inp.as_device_ptr().as_raw() as *const f32,

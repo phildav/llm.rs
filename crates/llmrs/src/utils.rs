@@ -1,4 +1,4 @@
-use std::io::{BufRead, Read, Write, Seek};
+use std::io::{BufRead, Read, Write};
 use std::fs;
 use std::path::Path;
 use cust::memory::DeviceCopy;
@@ -8,8 +8,21 @@ use cust::{
 };
 use std::cmp::min;
 use std::mem;
-use rand::{Rng, SeedableRng, distributions::Uniform};
 use bytemuck::{NoUninit, AnyBitPattern};
+
+pub fn read_le_u16<R: BufRead>(reader: &mut R) -> u16 {
+    let mut buf = [0u8; 2];
+
+    reader.read_exact(&mut buf).unwrap();
+    u16::from_le_bytes(buf)
+}
+
+pub fn read_le_i16<R: BufRead>(reader: &mut R) -> i16 {
+    let mut buf = [0u8; 2];
+
+    reader.read_exact(&mut buf).unwrap();
+    i16::from_le_bytes(buf)
+}
 
 pub fn read_le_u32_array<R: BufRead, const N: usize>(reader: &mut R) -> [u32; N] {
     let mut resp = [0u32; N];
@@ -194,14 +207,16 @@ pub fn device_to_file(file: &mut std::fs::File, src: &DeviceSlice<f32>, buffer_s
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::utils::{device_to_file, file_to_device};
     use std::fs;
+    use std::io::Seek;
     use cust::{
         memory::DeviceBuffer,
         stream::Stream,
         prelude::*,
     };
-    use rand::Rng;
+    use rand::{Rng, SeedableRng};
+    
 
     fn test_device_file_io(nelem: usize, wt_buf_size: usize, rd_buf_size: usize) {
         // Initialize CUDA context

@@ -429,6 +429,7 @@ __global__ void __launch_bounds__(512, 2) // todo - any warnings on Turing with 
 // ----------------------------------------------------------------------------
 // kernel launchers
 
+extern "C" {
 // similar to `fused_residual_forward5`
 void layernorm_forward(floatX* out, float* mean, float* rstd,
                        floatX* inp, const floatX* weight, const floatX* bias,
@@ -502,4 +503,6 @@ void layernorm_backward(floatX* dinp, floatX* dweight, floatX* dbias, float* scr
     cudaCheck(cudaMemsetAsync(scratch, 0, 1 * sizeof(float), stream)); // only need to reset the flag to 0
     layernorm_backward_kernel10<<<grid_size, block_size, shared_mem_size, stream>>>(dinp, dweight, dbias, scratch, dout, inp, weight, mean, rstd, B, T, C);
     cudaCheck(cudaGetLastError());
+}
+
 }

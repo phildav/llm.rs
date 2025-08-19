@@ -92,8 +92,8 @@ struct GPT2 {
     // other run state configuration
     batch_size: usize, // the batch size (B) of current forward pass
     seq_len: usize, // the sequence length (T) of current forward pass
-    inputs: Option<Vec<u32>>, // the input tokens for the current forward pass
-    targets: Option<Vec<u32>>, // the target tokens for the current forward pass
+    inputs: Option<Vec<i32>>, // the input tokens for the current forward pass
+    targets: Option<Vec<i32>>, // the target tokens for the current forward pass
     mean_loss: f32, // after a forward pass with targets, will be populated with the mean loss
 }
 
@@ -203,7 +203,7 @@ impl GPT2 {
         vec![0f32; total_size]
     }
 
-    fn get_parameters(params_memory: &mut [f32], param_sizes: [usize; NUM_PARAMETER_TENSORS]) -> ParameterTensors {
+    fn get_parameters(params_memory: &mut [f32], param_sizes: [usize; NUM_PARAMETER_TENSORS]) -> ParameterTensors<'_> {
         let param_sizes = param_sizes;
         // Rust impl: use split_at_mut to avoid the usage of unsafe
 
@@ -285,7 +285,7 @@ impl GPT2 {
         vec![0f32; total_size]
     }
 
-    fn get_activations(acts_memory: &mut [f32], act_sizes: [usize; NUM_ACTIVATION_TENSORS]) -> ActivationTensors {
+    fn get_activations(acts_memory: &mut [f32], act_sizes: [usize; NUM_ACTIVATION_TENSORS]) -> ActivationTensors<'_> {
         // split_at_mut is one way to avoid the usage of unsafe
 
         let (encoded, rest) = acts_memory.split_at_mut(act_sizes[0]);
@@ -341,7 +341,7 @@ impl GPT2 {
     }
 
     #[allow(non_snake_case)]
-    pub fn forward(&mut self, inputs: &[u32], opt_targets: Option<&[u32]>, B: usize, T: usize) {
+    pub fn forward(&mut self, inputs: &[i32], opt_targets: Option<&[i32]>, B: usize, T: usize) {
 
         // convenience parameters
         let V = self.config.vocab_size;
@@ -624,7 +624,7 @@ impl GPT2 {
 }
 
 #[allow(non_snake_case)]
-fn encoder_forward(out: &mut [f32], inp: &[u32], wte: &mut[f32], wpe: &mut[f32], B: usize, T: usize, C: usize) {
+fn encoder_forward(out: &mut [f32], inp: &[i32], wte: &mut[f32], wpe: &mut[f32], B: usize, T: usize, C: usize) {
     // out is (B,T,C). At each position (b,t), a C-dimensional vector summarizing token & position
     // inp is (B,T) of integers, holding the token ids at each (b,t) position
     // wte is (V,C) of token embeddings, short for "weight token embeddings"
@@ -650,7 +650,7 @@ fn encoder_forward(out: &mut [f32], inp: &[u32], wte: &mut[f32], wpe: &mut[f32],
 }
 
 #[allow(non_snake_case)]
-fn encoder_backward(dwte: &mut [f32], dwpe: &mut [f32], dout: &[f32], inp: &[u32], B: usize, T: usize, C: usize) {
+fn encoder_backward(dwte: &mut [f32], dwpe: &mut [f32], dout: &[f32], inp: &[i32], B: usize, T: usize, C: usize) {
     for b in 0..B {
         for t in 0..T {
             let dout_bt = &dout[b * T * C + t * C .. ];
@@ -1077,7 +1077,7 @@ fn softmax_forward(probs: &mut [f32], logits: &[f32], B: usize, T: usize, V: usi
 }
 
 #[allow(non_snake_case)]
-fn crossentropy_forward(losses: &mut [f32], probs: &[f32], targets: &[u32], B: usize, T: usize, Vp: usize) {
+fn crossentropy_forward(losses: &mut [f32], probs: &[f32], targets: &[i32], B: usize, T: usize, Vp: usize) {
     // output: losses is (B,T) of the individual losses at each position
     // input: probs are (B,T,Vp) of the probabilities
     // input: targets is (B,T) of integers giving the correct index in logits
@@ -1092,7 +1092,7 @@ fn crossentropy_forward(losses: &mut [f32], probs: &[f32], targets: &[u32], B: u
 }
 
 #[allow(non_snake_case)]
-fn crossentropy_softmax_backward(dlogits: &mut [f32], dlosses: &[f32], probs: &[f32], targets: &[u32], B: usize, T: usize, V: usize, Vp: usize) {
+fn crossentropy_softmax_backward(dlogits: &mut [f32], dlosses: &[f32], probs: &[f32], targets: &[i32], B: usize, T: usize, V: usize, Vp: usize) {
     // backwards through both softmax and crossentropy
     for b in 0..B {
         for t in 0..T {
@@ -1123,17 +1123,17 @@ fn random_f32(state: &mut u64) -> f32 { // // random float32 in [0,1)
     ((random_u32(state) >> 8) as f32) / 16777216.0f32
 }
 
-fn sample_mult(probabilities: &[f32], coin: f32) -> u32 {
+fn sample_mult(probabilities: &[f32], coin: f32) -> i32 {
     // sample index from probabilities (they must sum to 1!)
     // coin is a random number in [0, 1), usually from random_f32()
     let mut cdf = 0.0f32;
     for (i, &p) in probabilities.iter().enumerate() {
         cdf += p;
         if coin < cdf {
-            return i as u32;
+            return i as i32;
         }
     }
-    (probabilities.len() - 1) as u32 // in case of rounding errors
+    (probabilities.len() - 1) as i32 // in case of rounding errors
 }
 
 // main training loop
@@ -1165,7 +1165,7 @@ fn main() {
 
     // some memory for generating samples from the model
     let mut rng_state = 1337u64;
-    let mut gen_tokens = vec![0u32; B*T];
+    let mut gen_tokens = vec![0i32; B*T];
     const GEN_T: usize = 64;
 
 
