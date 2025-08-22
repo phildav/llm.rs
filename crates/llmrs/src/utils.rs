@@ -10,6 +10,7 @@ use std::cmp::min;
 use std::mem;
 use bytemuck::{NoUninit, AnyBitPattern};
 
+
 pub fn read_le_u16<R: BufRead>(reader: &mut R) -> u16 {
     let mut buf = [0u8; 2];
 
@@ -50,6 +51,13 @@ pub fn read_fill_le_u16_array<R: BufRead>(reader: &mut R, array: &mut Vec<u16>) 
         reader.read_exact(&mut buf).unwrap();
         array[i] = u16::from_le_bytes(buf);
     }
+}
+
+// Helper function to write 64-bit value as two 32-bit integers
+pub fn write_u64_as_i32s(header: &mut [i32], offset: usize, value: u64) {
+    let bytes: [i32; 2] = bytemuck::cast(value);
+    header[offset] = bytes[0];
+    header[offset + 1] = bytes[1];
 }
 
 /// Find the maximum step number from DONE files in the output log directory.
@@ -148,10 +156,10 @@ pub fn file_to_device<T: DeviceCopy + NoUninit + AnyBitPattern, R: Read>(dst: &m
 
 }
 
-pub fn device_to_file(file: &mut std::fs::File, src: &DeviceSlice<f32>, buffer_size: usize, stream: &Stream) {
+pub fn device_to_file<T: DeviceCopy + NoUninit + AnyBitPattern>(file: &mut std::fs::File, src: &DeviceSlice<T>, buffer_size: usize, stream: &Stream) {
 
     // 1) Allocate pinned host memory (page-locked). Using `uninitialized` so we can fill by reading.
-    let mut buffer_space = unsafe { LockedBuffer::<f32>::uninitialized(2 * buffer_size).unwrap() };
+    let mut buffer_space = unsafe { LockedBuffer::<T>::uninitialized(2 * buffer_size).unwrap() };
     let (mut read_buffer, mut write_buffer) = buffer_space.as_mut_slice().split_at_mut(buffer_size);
 
     // 2) Prime pipeline: copy first chunk from device
@@ -208,6 +216,7 @@ pub fn device_to_file(file: &mut std::fs::File, src: &DeviceSlice<f32>, buffer_s
 #[cfg(test)]
 mod tests {
     use crate::utils::{device_to_file, file_to_device};
+    use crate::common::{FloatX, zero_floatx, f32_to_floatx};
     use std::fs;
     use std::io::Seek;
     use cust::{
@@ -222,14 +231,14 @@ mod tests {
         // Initialize CUDA context
         let _ctx = cust::quick_init().unwrap();
         
-        let mut data = DeviceBuffer::<f32>::zeroed(nelem).unwrap();
+        let mut data = DeviceBuffer::<FloatX>::zeroed(nelem).unwrap();
 
         // generate random array
-        let mut random_data = vec![0.0f32; nelem];
+        let mut random_data = vec![zero_floatx(); nelem];
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let dist = rand::distributions::Uniform::new(-100.0f32, 100.0f32);
         for i in 0..nelem {
-            random_data[i] = rng.sample(dist);
+            random_data[i] = f32_to_floatx(rng.sample(dist));
         }
 
         data.copy_from(&random_data).unwrap();
@@ -252,17 +261,17 @@ mod tests {
         // rewind and read file -> device. No close/reopen because for some reason the file will not appear on the file system immediately
         tmp.rewind().unwrap();
 
-        let mut reload = DeviceBuffer::<f32>::zeroed(nelem).unwrap();
+        let mut reload = DeviceBuffer::<FloatX>::zeroed(nelem).unwrap();
         
         file_to_device(&mut reload, &mut tmp, rd_buf_size, &stream);
         drop(tmp);
 
-        let mut cmp = vec![0.0f32; nelem];
+        let mut cmp = vec![zero_floatx(); nelem];
         reload.copy_to(&mut cmp).unwrap();
         for i in 0..nelem {
             if random_data[i] != cmp[i] {
                 let _ = fs::remove_file("tmp.bin");
-                panic!("FAIL: Mismatch at position {}: {} vs {}", i, random_data[i], cmp[i]);
+                panic!("FAIL: Mismatch at position {}: {:?} vs {:?}", i, random_data[i], cmp[i]);
             }
         }
 

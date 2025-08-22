@@ -152,7 +152,13 @@ extern "C" {
     void fused_classifier(floatX* logits, float* losses,
         const float dloss, const int* targets,
         int B, int T, int V, int P, bool write_dlogits, cudaStream_t stream) {
-            fused_classifier(logits, losses, dloss, targets, B, T, V, P, write_dlogits, stream);
+            if (write_dlogits) {
+                fused_classifier<floatX, true>(logits, losses, dloss, targets,
+                                               B, T, V, P, std::true_type{}, stream);
+            } else {
+                fused_classifier<floatX, false>(logits, losses, dloss, targets,
+                                                B, T, V, P, std::false_type{}, stream);
+            }
         }
 
 }

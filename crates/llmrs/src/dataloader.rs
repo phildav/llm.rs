@@ -10,6 +10,16 @@ use crate::utils::{read_fill_le_u16_array, read_le_u32_array, read_le_u16};
 
 const HEADER_SIZE: usize = 256;
 
+/// Struct to hold all fields required to save/load the shuffling state of the dataloader
+#[derive(Clone)]
+pub struct ShufflingState {
+    pub total_files: usize,
+    pub shard_indices: Vec<i32>,
+    pub shard_num_samples: usize,
+    pub intra_shard_indices: Vec<i32>,
+    pub restored_rng: Mt19937,
+}
+
 pub struct Dataloader {
     files: Vec<PathBuf>,
     // batch and token information
@@ -26,7 +36,7 @@ pub struct Dataloader {
     buffer: Vec<i32>, // we fread data from file into this buffer
     // random shuffle related variables
     shuffle_rng: Option<Mt19937>,
-    should_shuffle: bool,
+    pub should_shuffle: bool,
     shard_indices: Option<Vec<usize>>,
     intra_shard_indices: Option<Vec<usize>>,
     // sizes in bytes
@@ -183,6 +193,8 @@ impl Dataloader {
         // -1 uint16_t due to us taking B*T+1 tokens but moving by B*T tokens
         self.shard_num_samples = (ntok - 1) * std::mem::size_of::<u16>() / self.total_batch_size_bytes;
 
+        println!("Loaded shard #{}: Shard num samples: {}", shard_index, self.shard_num_samples);
+
         self.tokens_file = Some(tokens_file_reader);
 
         ntok
@@ -230,13 +242,29 @@ impl Dataloader {
 
     }
 
-    pub fn resume_shuffling(&mut self, total_files: usize, shard_indices: Vec<i32>, shard_num_samples: usize, intra_shard_indices: Vec<i32>, restored_rng: Mt19937) {
+    pub fn resume_shuffling(&mut self, shuffling_state: ShufflingState) {
         self.should_shuffle = true;
-        assert_eq!(total_files, self.files.len());
-        self.shard_indices = Some(shard_indices.into_iter().map(|x| x as usize).collect());
-        assert_eq!(shard_num_samples, self.shard_num_samples);
-        self.intra_shard_indices = Some(intra_shard_indices.into_iter().map(|x| x as usize).collect());
-        self.shuffle_rng = Some(restored_rng)
+        assert_eq!(shuffling_state.total_files, self.files.len());
+        self.shard_indices = Some(shuffling_state.shard_indices.into_iter().map(|x| x as usize).collect());
+        // FIXME from original code, but we are not guaranteed to have loaded the same shard.
+        //assert_eq!(shuffling_state.shard_num_samples, self.shard_num_samples);
+        self.intra_shard_indices = Some(shuffling_state.intra_shard_indices.into_iter().map(|x| x as usize).collect());
+        self.shuffle_rng = Some(shuffling_state.restored_rng)
+    }
+
+    /// Save the current shuffling state for later restoration
+    pub fn save_shuffling_state(&self) -> Option<ShufflingState> {
+        if !self.should_shuffle {
+            return None;
+        }
+        
+        Some(ShufflingState {
+            total_files: self.files.len(),
+            shard_indices: self.shard_indices.as_ref()?.iter().map(|&x| x as i32).collect(),
+            shard_num_samples: self.shard_num_samples,
+            intra_shard_indices: self.intra_shard_indices.as_ref()?.iter().map(|&x| x as i32).collect(),
+            restored_rng: self.shuffle_rng.as_ref()?.clone(),
+        })
     }
 
     /// Resume the dataloader to a specific position
@@ -545,4 +573,52 @@ impl EvalLoader {
         correct
     }
 
+} 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+
+    #[test]
+    fn test_shuffling_state_save_and_restore() {
+        // Print current directory for debugging
+        println!("Current directory: {}", env::current_dir().unwrap().display());
+
+        // Create a simple dataloader with shuffling enabled
+        let dataloader = Dataloader::new("../../dev/data/tinyshakespeare/*.bin", 4, 8, true);
+        
+        // Save the shuffling state
+        let saved_state = dataloader.save_shuffling_state();
+        assert!(saved_state.is_some());
+        
+        let shuffling_state = saved_state.unwrap();
+        
+        // Verify the saved state has the correct values
+        assert_eq!(shuffling_state.total_files, dataloader.files.len());
+        assert_eq!(shuffling_state.shard_num_samples, dataloader.shard_num_samples);
+        assert!(shuffling_state.shard_indices.len() > 0);
+        assert!(shuffling_state.intra_shard_indices.len() > 0);
+        
+        // Create a new dataloader and restore the state
+        let mut new_dataloader = Dataloader::new("../../dev/data/tinyshakespeare/*.bin", 4, 8, false);
+        new_dataloader.resume_shuffling(shuffling_state);
+        
+        // Verify the state was restored correctly
+        assert!(new_dataloader.should_shuffle);
+        assert!(new_dataloader.shuffle_rng.is_some());
+        assert!(new_dataloader.shard_indices.is_some());
+        assert!(new_dataloader.intra_shard_indices.is_some());
+    }
+
+    #[test]
+    fn test_shuffling_state_no_shuffle() {
+        // Create a dataloader without shuffling
+        let dataloader = Dataloader::new("../../dev/data/tinyshakespeare/*.bin", 4, 8, false);
+        
+        // Try to save shuffling state - should return None
+        let saved_state = dataloader.save_shuffling_state();
+        assert!(saved_state.is_none());
+    }
 } 

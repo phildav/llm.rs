@@ -10,6 +10,7 @@ E.g., the layernorms are connected to the residuals so we += in layernorm backwa
 */
 
 #include <assert.h>
+#include <stdio.h>
 // llmc internal imports
 #include "cuda_common.h"
 #include "cuda_utils.cuh"

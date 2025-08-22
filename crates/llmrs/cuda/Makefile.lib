@@ -33,7 +33,7 @@ ifdef ENABLE_FP16
   CFLAGS += -DENABLE_FP16
 endif
 
-NVCCFLAGS = -lcublas -lcublasLt -std=c++17
+NVCCFLAGS = --threads=0 -t=0 --use_fast_math -std=c++17 -O3 -lcublas -lcublasLt -lnvidia-ml
 
 # List all CUDA source files
 CUDA_SOURCES = $(wildcard *.cu)
@@ -51,8 +51,8 @@ endif
 # Build individual object files in target directory
 $(TARGET_DIR)/%.o: %.cu
 	@echo "Compiling $< with nvcc..."
-	@echo "Command: $(NVCC) $(CFLAGS) $(NVCCFLAGS) -c $< -o $@"
-	$(NVCC) $(CFLAGS) $(NVCCFLAGS) -c $< -o $@
+	@echo "Command: $(NVCC) $(NVCCFLAGS) -c $< -o $@"
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 # Create static library in target directory
 $(TARGET_DIR)/libllmrs_kernels.a: $(CUDA_OBJECTS)

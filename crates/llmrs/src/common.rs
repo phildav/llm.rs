@@ -2,11 +2,11 @@
 
 // Newtype wrappers to implement required traits
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Bf16(pub half::bf16);
 
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct F16(pub half::f16);
 
 use cust::memory::DeviceCopy;
@@ -96,14 +96,19 @@ impl ToF32 for FloatX {
     }
 }
 
+pub fn f32_to_floatx(v: f32) -> FloatX {
+    #[cfg(feature = "bf16")] { Bf16(half::bf16::from_f32(v)) }
+    #[cfg(feature = "fp16")] { F16(half::f16::from_f32(v)) }
+    #[cfg(all(not(feature="bf16"), not(feature="fp16")))] { v }
+}
 
-pub fn f32_to_floatx(v: &[f32]) -> Vec<FloatX> {
-    #[cfg(feature = "bf16")] { v.iter().copied().map(|x| Bf16(half::bf16::from_f32(x))).collect() }
-    #[cfg(feature = "fp16")] { v.iter().copied().map(|x| F16(half::f16::from_f32(x))).collect() }
+pub fn vec_f32_to_floatx(v: &[f32]) -> Vec<FloatX> {
+    #[cfg(feature = "bf16")] { v.iter().copied().map(|x| f32_to_floatx(x)).collect() }
+    #[cfg(feature = "fp16")] { v.iter().copied().map(|x| f32_to_floatx(x)).collect() }
     #[cfg(all(not(feature="bf16"), not(feature="fp16")))] { v.to_vec() }
 }
 
-pub fn floatx_to_f32(v: &[FloatX]) -> Vec<f32> {
+pub fn vec_floatx_to_f32(v: &[FloatX]) -> Vec<f32> {
     v.iter().map(|x| x.to_f32()).collect()
 }
 

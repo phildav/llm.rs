@@ -16,11 +16,12 @@ rand_mt = "5.0.0"
 rand = "0.8.5"
 rayon = "1.10.0"
 cust = "0.3.2"
-
+nvml-wrapper = "0.11.0"
 
 half = "2.6.0"
 bytemuck = "1.23.2"
 clap = { version = "4.0", features = ["derive"] }
+libc = "0.2.175"
 
 [profile.release]
 opt-level = 3

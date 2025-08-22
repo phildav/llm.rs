@@ -6,6 +6,7 @@ Attention, as a fallback when we do not use the Flash Attention from cuDNN
 #include "cuda_common.h"
 #include "cuda_utils.cuh"
 #include "cublas_common.h"
+#include "matmul.h"
 
 // ----------------------------------------------------------------------------
 // CUDA kernels
@@ -192,6 +193,7 @@ __global__ void softmax_autoregressive_backward_inplace_kernel(floatX* datt, con
 // ----------------------------------------------------------------------------
 // kernel launchers
 
+extern "C" {
 void attention_forward(floatX* out, floatX* qkvr, floatX* att,
                        floatX* inp,
                        int B, int T, int C, int NH, cudaStream_t stream) {
@@ -273,4 +275,6 @@ void attention_backward(floatX* dinp, floatX* dqkvr, floatX* datt, floatX* scrat
     num_blocks = CEIL_DIV(B * NH * T * HS, block_size);
     permute_kernel_backward<<<num_blocks, block_size, 0, stream>>>(dinp, dq, dk, dv, B, T, NH, HS);
     cudaCheck(cudaGetLastError());
+}
+
 }

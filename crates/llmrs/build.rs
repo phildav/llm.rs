@@ -12,11 +12,12 @@ fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     
     // Set GPU compute capability if specified
+    /*
     if let Ok(arch) = env::var("LLMRS_NVCC_ARCH") {
         unsafe { env::set_var("GPU_COMPUTE_CAPABILITY", arch); }
     } else if let Ok(arch) = env::var("LLMRS_NVCC_ARCH") {
         unsafe { env::set_var("GPU_COMPUTE_CAPABILITY", arch); }
-    }
+    }*/
 
     // Set dtype defines as environment variables
     if env::var_os("CARGO_FEATURE_BF16").is_some() {
@@ -36,16 +37,33 @@ fn main() {
     }
 
     // Run make to build the CUDA kernel library
-    let status = Command::new("make")
+    let output = Command::new("make")
         .current_dir(cuda_dir)
         .arg("-f")
         .arg("Makefile.lib")
         .arg("all")
-        .status()
+        .output()
         .expect("Failed to execute make");
 
-    if !status.success() {
-        panic!("Make failed with exit code: {}", status);
+    // Print the make command output to show nvcc flags
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    
+    // Print each line separately to avoid truncation
+    for line in stdout.lines() {
+        if !line.trim().is_empty() {
+            println!("cargo:warning=Make: {}", line);
+        }
+    }
+    
+    for line in stderr.lines() {
+        if !line.trim().is_empty() {
+            println!("cargo:warning=Make: {}", line);
+        }
+    }
+
+    if !output.status.success() {
+        panic!("Make failed with exit code: {}", output.status);
     }
 
     // The library is now built directly in the target directory

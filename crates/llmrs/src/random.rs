@@ -2,6 +2,7 @@ use rand_mt::Mt;
 use std::f32::consts::PI;
 
 
+#[derive(Clone)]
 pub struct Mt19937 {
     rng: Mt,
 }
@@ -163,6 +164,31 @@ pub fn from_c_state(c_state: &CMt19937State) -> Mt19937 {
     Mt19937 { rng: mt }
 }
 
+/// Convert Mt19937 state to a C-compatible mt19937_state struct
+/// This extracts the internal state and converts it to the C format
+pub fn to_c_state(_mt19937: &Mt19937) -> CMt19937State {
+    // Capture the next 624 tempered outputs without advancing the original RNG
+    let mut rng_clone = _mt19937.clone();
+    let mut tempered_outputs = [0u32; 624];
+    for i in 0..624 {
+        tempered_outputs[i] = rng_clone.randu32();
+    }
+
+    // Untemper to recover the raw state words expected by the C struct
+    let mut raw_state = [0u32; 624];
+    for i in 0..624 {
+        raw_state[i] = untemper(tempered_outputs[i]);
+    }
+
+    CMt19937State {
+        seed_: 0, // original seed is not tracked; not needed for restoration
+        left_: 1,
+        next_: 0,
+        state_: raw_state,
+        matrix_a: [0, 0x9908b0df],
+    }
+}
+
 /// Convert raw Mersenne Twister state to tempered outputs
 /// This is the inverse of the tempering function used in randint32
 fn raw_state_to_tempered_outputs(raw_state: &[u32; 624]) -> [u32; 624] {
@@ -179,6 +205,28 @@ fn raw_state_to_tempered_outputs(raw_state: &[u32; 624]) -> [u32; 624] {
     }
     
     tempered
+}
+
+/// Invert the MT19937 tempering to retrieve raw state from a tempered output
+fn untemper(y: u32) -> u32 {
+    // Invert: y ^= y >> 18
+    let mut x = y ^ (y >> 18);
+
+    // Invert: y ^= (y << 15) & 0xefc60000
+    x ^= (x << 15) & 0xefc60000;
+
+    // Invert: y ^= (y << 7) & 0x9d2c5680
+    // Do this iteratively to resolve dependencies introduced by left-shift xor
+    x ^= (x << 7) & 0x9d2c5680;
+    x ^= (x << 7) & 0x9d2c5680;
+    x ^= (x << 7) & 0x9d2c5680;
+    x ^= (x << 7) & 0x9d2c5680;
+
+    // Invert: y ^= y >> 11
+    x ^= x >> 11;
+    x ^= x >> 22;
+
+    x
 }
 
 

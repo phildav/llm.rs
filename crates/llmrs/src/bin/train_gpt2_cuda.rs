@@ -1,9 +1,9 @@
-use llm_rs::common::{f32_to_floatx, zero_floatx, FloatX, PrecisionMode, PRECISION_MODE, ToF32};
+use llm_rs::common::{vec_f32_to_floatx, zero_floatx, FloatX, PrecisionMode, PRECISION_MODE, ToF32};
 use clap::Parser;
 use std::io::{Read, BufReader, Write};
 use std::fs::File;
-use std::cmp::min;
-use llm_rs::utils::{find_max_step, read_le_u32_array, file_to_device};
+use std::cmp::{max, min};
+use llm_rs::utils::{find_max_step, read_le_u32_array, file_to_device, write_u64_as_i32s};
 use llm_rs::{dataloader::Dataloader, dataloader::EvalLoader, tokenizer::Tokenizer, scheduler::LearningRateScheduler};
 use llm_rs::logger::Logger;
 use llm_rs::sampler;
@@ -12,6 +12,23 @@ use llm_rs::outlier_detector::OutlierDetector;
 use cust::{prelude::*};
 use cust::memory::{DeviceCopy, DeviceMemory, GpuBuffer, LockedBuffer};
 
+// Simple MultiGpuConfig struct for checkpoint functionality
+#[derive(Debug, Clone)]
+struct MultiGpuConfig {
+    process_rank: i32,
+    num_processes: usize,
+    zero_stage: i32,
+}
+
+impl MultiGpuConfig {
+    fn new(process_rank: i32, num_processes: usize, zero_stage: i32) -> Self {
+        Self {
+            process_rank,
+            num_processes,
+            zero_stage,
+        }
+    }
+}
 
 #[derive(Debug)]
 struct GPT2Config {
@@ -31,7 +48,7 @@ const PADDED_VOCAB_SIZE: usize = 50304; // padded to 128 for CUDA kernel efficie
 pub const NUM_PARAMETER_TENSORS: usize = 16;
 
 struct ParameterTensors {
-    wte: DeviceSlice<FloatX>, // (V, C)
+    wte: DeviceSlice<FloatX>, // (Vp, C)
     wpe: DeviceSlice<FloatX>, // (maxT, C)
     ln1w: DeviceSlice<FloatX>, // (L, C)
     ln1b: DeviceSlice<FloatX>, // (L, C)
@@ -58,9 +75,9 @@ impl ParameterTensors {
     fn allocate(config: &GPT2Config) -> Self {
         let C = config.channels;
         let L = config.num_layers;
-        let V = config.vocab_size;
+        let Vp = config.padded_vocab_size;
         let seq_len = config.max_seq_len;
-        let sizes = ParameterTensors::sizes(seq_len, C, L, V);
+        let sizes = ParameterTensors::sizes(seq_len, C, L, Vp);
 
         let allocation = sizes.to_vec();
         assert_eq!(allocation.len(), NUM_PARAMETER_TENSORS);
@@ -92,9 +109,9 @@ impl ParameterTensors {
     }
 
     #[allow(non_snake_case)]
-    fn sizes(seq_len: usize, C: usize, L: usize, V: usize) -> ParameterTensorsSizes {
+    fn sizes(seq_len: usize, C: usize, L: usize, Vp: usize) -> ParameterTensorsSizes {
         ParameterTensorsSizes {
-            wte: V * C,
+            wte: Vp * C,
             wpe: seq_len * C,
             ln1w: L * C,
             ln1b: L * C,
@@ -141,14 +158,14 @@ impl ParameterTensorsSizes {
 
 // the parameters of the model
 pub const NUM_ACTIVATION_TENSORS: usize = 21;
-pub const NUM_ACTIVATION_TENSORS_FLOATX: usize = 16;
-pub const NUM_ACTIVATION_TENSORS_FLOAT: usize = 5;
+pub const NUM_ACTIVATION_TENSORS_FLOATX: usize = 14;
+pub const NUM_ACTIVATION_TENSORS_FLOAT: usize = 7;
 
 struct ActivationTensors {
     encoded: DeviceSlice<FloatX>, // (B, T, C)
     ln1: DeviceSlice<FloatX>,     // (L, B, T, C)
-    ln1_mean: DeviceSlice<FloatX>,// (L, B, T)
-    ln1_rstd: DeviceSlice<FloatX>,// (L, B, T)
+    ln1_mean: DeviceSlice<f32>,// (L, B, T)
+    ln1_rstd: DeviceSlice<f32>,// (L, B, T)
     atty: DeviceSlice<FloatX>, // (L, B, T, C)
     att: DeviceSlice<FloatX>,  // (L, B, NH, T, T)
     residual2: DeviceSlice<FloatX>,  // (L, B, T, C)
@@ -182,57 +199,56 @@ struct ActivationTensors {
 impl ActivationTensors {
 
     #[allow(non_snake_case)]
-    fn allocate(config: &GPT2Config, B: usize, T: usize) -> Self {
+    fn allocate(config: &GPT2Config, B: usize, T: usize, recompute: i32) -> Self {
         let C = config.channels;
         let L = config.num_layers;
         let NH = config.num_heads;
-        let V = config.vocab_size;
-        let sizes = ActivationTensors::sizes(B, T, C, L, NH, V);
+        let Vp = config.padded_vocab_size;
+        let sizes = ActivationTensors::sizes(B, T, C, L, NH, Vp, recompute);
 
-
-        let floatx_allocation = [sizes.encoded, sizes.ln1, sizes.ln1_mean, sizes.ln1_rstd, sizes.atty, sizes.att, sizes.residual2, sizes.ln2, sizes.fch, sizes.fch_gelu, sizes.residual3, sizes.lnf, sizes.qkvr, sizes.output, sizes.scratch_bt4c, sizes.scratch_btc];
+        let floatx_allocation = [sizes.encoded, sizes.ln1, sizes.atty, sizes.att, sizes.residual2, sizes.ln2, sizes.fch, sizes.fch_gelu, sizes.residual3, sizes.lnf, sizes.qkvr, sizes.output, sizes.scratch_bt4c, sizes.scratch_btc];
         assert_eq!(floatx_allocation.len(), NUM_ACTIVATION_TENSORS_FLOATX);
         let floatx_total_size = floatx_allocation.iter().sum();
         let mut act_memory_floatx = DeviceBuffer::<FloatX>::zeroed(floatx_total_size).unwrap();
-        let floatx_slices = buffer_to_slices(&floatx_allocation, &mut act_memory_floatx);
+        let mut floatx_slices = buffer_to_slices(&floatx_allocation, &mut act_memory_floatx);
         assert_eq!(floatx_slices.len(), NUM_ACTIVATION_TENSORS_FLOATX);
 
-        let f32_allocation = [sizes.ln2_mean, sizes.ln2_rstd, sizes.lnf_mean, sizes.lnf_rstd, sizes.losses];
+        let f32_allocation = [sizes.ln1_mean, sizes.ln1_rstd, sizes.ln2_mean, sizes.ln2_rstd, sizes.lnf_mean, sizes.lnf_rstd, sizes.losses];
         assert_eq!(f32_allocation.len(), NUM_ACTIVATION_TENSORS_FLOAT);
         let f32_total_size = f32_allocation.iter().sum();
         let mut act_memory_f32 = DeviceBuffer::<f32>::zeroed(f32_total_size).unwrap();
-        let f32_slices = buffer_to_slices(&f32_allocation, &mut act_memory_f32);
+        let mut f32_slices = buffer_to_slices(&f32_allocation, &mut act_memory_f32);
         assert_eq!(f32_slices.len(), NUM_ACTIVATION_TENSORS_FLOAT);
-
+        
         Self {
-            encoded: floatx_slices[0],
-            ln1: floatx_slices[1],
-            ln1_mean: floatx_slices[2],
-            ln1_rstd: floatx_slices[3],
-            atty: floatx_slices[4],
-            att: floatx_slices[5],
-            residual2: floatx_slices[6],
-            ln2: floatx_slices[7],
-            ln2_mean: f32_slices[0],
-            ln2_rstd: f32_slices[1],
-            fch: floatx_slices[8],
-            fch_gelu: floatx_slices[9],
-            residual3: floatx_slices[10],
-            lnf: floatx_slices[11],
-            lnf_mean: f32_slices[2],
-            lnf_rstd: f32_slices[3],
-            losses: f32_slices[4],
-            qkvr: floatx_slices[12],
-            output: floatx_slices[13],
-            scratch_bt4c: floatx_slices[14],
-            scratch_btc: floatx_slices[15],
+            encoded: floatx_slices.remove(0),
+            ln1: floatx_slices.remove(0),
+            ln1_mean: f32_slices.remove(0),
+            ln1_rstd: f32_slices.remove(0),
+            atty: floatx_slices.remove(0),
+            att: floatx_slices.remove(0),
+            residual2: floatx_slices.remove(0),
+            ln2: floatx_slices.remove(0),
+            ln2_mean: f32_slices.remove(0),
+            ln2_rstd: f32_slices.remove(0),
+            fch: floatx_slices.remove(0),
+            fch_gelu: floatx_slices.remove(0),
+            residual3: floatx_slices.remove(0),
+            lnf: floatx_slices.remove(0),
+            lnf_mean: f32_slices.remove(0),
+            lnf_rstd: f32_slices.remove(0),
+            losses: f32_slices.remove(0),
+            qkvr: floatx_slices.remove(0),
+            output: floatx_slices.remove(0),
+            scratch_bt4c: floatx_slices.remove(0),
+            scratch_btc: floatx_slices.remove(0),
             memory_floatx: act_memory_floatx,
             memory_float: act_memory_f32,
         }
     }
 
     #[allow(non_snake_case)]
-    fn sizes(B: usize, T: usize, C: usize, L: usize, NH: usize, V: usize) -> ActivationTensorsSizes {
+    fn sizes(B: usize, T: usize, C: usize, L: usize, NH: usize, Vp: usize, recompute: i32) -> ActivationTensorsSizes {
         ActivationTensorsSizes {
             encoded: B * T * C,
             ln1: L * B * T * C,
@@ -245,14 +261,15 @@ impl ActivationTensors {
             ln2_mean: L * B * T,
             ln2_rstd: L * B * T,
             fch: L * B * T * (4 * C),
-            fch_gelu: L * B * T * (4 * C),
+            // if recompute >= 1 then we will recompute gelu_forward during backward and use this as scratch buffer
+            fch_gelu: if recompute < 1 { L * B * T * (4 * C) } else { B * T * 4*C },
             residual3: L * B * T * C,
             lnf: B * T * C,
             lnf_mean: B * T,
             lnf_rstd: B * T,
             losses: B * T,
             qkvr: L * B * T * (3 * C),
-            output: B * T * std::cmp::max(3 * C, std::cmp::max(NH * T, V)),
+            output: B * T * max(3 * C, max(NH * T, Vp)),
             scratch_bt4c: B * T * (4 * C),
             scratch_btc: B * T * C,
         }
@@ -284,16 +301,6 @@ struct ActivationTensorsSizes {
     scratch_btc: usize,
 }
 
-impl ActivationTensorsSizes {
-    pub fn total_floatx_size(&self) -> usize {
-        self.encoded + self.ln1 + self.ln1_mean + self.ln1_rstd + self.att + self.residual2 + self.ln2 + self.fch + self.fch_gelu + self.residual3 + self.lnf + self.qkvr + self.output + self.scratch_bt4c + self.scratch_btc
-    }
-
-    pub fn total_float_size(&self) -> usize {
-        self.ln2_mean + self.ln2_rstd + self.lnf_mean + self.lnf_rstd + self.losses
-    }
-}
-
 fn buffer_to_slices<T: DeviceCopy>(allocation: &[usize], memory: &mut DeviceBuffer<T>) -> Vec<DeviceSlice<T>> {
     let mut offset = 0usize;
     let mut out = Vec::with_capacity(allocation.len());
@@ -322,8 +329,8 @@ struct GPT2 {
     num_parameters: usize,
 
     // gradients of the weights
-    //grads are obtained from grads_memory
-    grads_memory: Option<DeviceBuffer<FloatX>>,
+    grads: Option<ParameterTensors>,
+    //grads_memory: Option<DeviceBuffer<FloatX>>,
     // buffers for the AdamW optimizer
     m_memory: Option<DeviceBuffer<f32>>,
     v_memory: Option<DeviceBuffer<f32>>,
@@ -350,7 +357,7 @@ struct GPT2 {
     recompute: i32, // recompute gelu | layernorm forward during model backward? 0|1|2
     // CPU scratch buffers for encoder backward
     workload_indices: Option<Vec<i32>>, // encoder_backward, B*T*num_c_groups (int)
-    bucket_info: Option<Vec<i32>>,     // encoder_backward, B*T*num_c_groups (int4) - size for worst case
+    bucket_info: Option<Vec<Int4>>,     // encoder_backward, B*T*num_c_groups (int4) - size for worst case
 }
 
 impl GPT2 {
@@ -358,15 +365,18 @@ impl GPT2 {
 
     #[allow(non_snake_case)]
     fn allocate_state(&mut self, B: usize, T: usize) {
-        println!("allocating {} MiB for parameter gradients", self.num_parameters * size_of::<FloatX>() / (1024 * 1024));
-        assert!(self.grads_memory.is_none());
+        assert!(self.grads.is_none());
 
-        self.grads_memory = Some(DeviceBuffer::<FloatX>::zeroed(self.num_parameters).unwrap());
+        self.grads = Some(ParameterTensors::allocate(&self.config));
+        println!("allocated {} MiB for parameter gradients", self.grads.as_ref().unwrap().num_parameters * size_of::<FloatX>() / (1024 * 1024));
 
         self.batch_size = B;
         self.seq_len = T;
 
-        self.acts = Some(ActivationTensors::allocate(&self.config, B, T));
+        self.acts = Some(ActivationTensors::allocate(&self.config, B, T, self.recompute));
+        println!("allocated {} MiB for FloatX activations", self.acts.as_ref().unwrap().memory_floatx.len() * std::mem::size_of::<FloatX>() / (1024 * 1024));
+        println!("allocated {} MiB for f32 activations", self.acts.as_ref().unwrap().memory_float.len() * std::mem::size_of::<f32>() / (1024 * 1024));
+
         // also create memory for caching inputs and targets
         self.inputs = Some(DeviceBuffer::<i32>::zeroed(B * T).unwrap());
         self.targets = Some(DeviceBuffer::<i32>::zeroed(B * T).unwrap());
@@ -386,7 +396,8 @@ impl GPT2 {
         self.workload_indices = Some(vec![0i32; self.batch_size * self.seq_len * num_c_groups]);
         
         // Allocate bucket_info buffer: B*T*num_c_groups (int4) - size for worst case
-        self.bucket_info = Some(vec![0i32; self.batch_size * self.seq_len * num_c_groups * 4]);
+        self.bucket_info = Some(vec![Int4::default(); self.batch_size * self.seq_len * num_c_groups]);
+
 
         // we will now init the optimizer states and master weights
         // this is usually a substantial amount of memory allocation right here.
@@ -401,7 +412,7 @@ impl GPT2 {
 
         if self.use_master_weights {
             assert!(self.master_weights.is_none());
-            println!("allocating {} MiB for master copy of params", shard_num_parameters * size_of::<FloatX>() >> 20);
+            println!("allocating {} MiB for master copy of params", shard_num_parameters * size_of::<f32>() >> 20);
             self.master_weights = Some(DeviceBuffer::<f32>::zeroed(shard_num_parameters).unwrap());
         }
 
@@ -417,6 +428,38 @@ impl GPT2 {
         println!("memory per sequence: {} MiB", bytes_per_sequence / 1024 / 1024);
         println!(" -> estimated maximum batch size: {}", self.batch_size + free / bytes_per_sequence);
 
+    }
+
+    pub fn write_checkpoint(&self, checkpoint_path: &str) {
+        // write the model to a checkpoint file
+        println!("Writing model to {}", checkpoint_path);
+        let mut model_file = File::create(checkpoint_path)
+            .unwrap_or_else(|_| panic!("Error: cannot create file {:?}", checkpoint_path));
+        
+        // write the header first
+        let mut model_header = [0u32; 256];
+        model_header[0] = 20240326; // magic number
+        assert!(PRECISION_MODE == PrecisionMode::Fp32 || PRECISION_MODE == PrecisionMode::Bf16);
+        model_header[1] = if PRECISION_MODE == PrecisionMode::Fp32 { 3 } else { 5 }; // version
+        model_header[2] = self.config.max_seq_len as u32;
+        model_header[3] = self.config.vocab_size as u32;
+        model_header[4] = self.config.num_layers as u32;
+        model_header[5] = self.config.num_heads as u32;
+        model_header[6] = self.config.channels as u32;
+        model_header[7] = self.config.padded_vocab_size as u32;
+        
+        // Write header as little-endian u32 array
+        for &value in &model_header {
+            model_file.write_all(&value.to_le_bytes()).unwrap();
+        }
+        
+        // write the parameters
+        let stream = Stream::new(StreamFlags::DEFAULT, None).unwrap();
+        let buf_size = 32 * 1024 * 1024 / std::mem::size_of::<f32>(); // IO_BUF_SIZE
+        llm_rs::utils::device_to_file(&mut model_file, &self.params.memory, buf_size, &stream);
+        
+        // close file, we're done
+        drop(model_file);
     }
 
     /// Build GPT2 model from a checkpoint file
@@ -472,6 +515,7 @@ impl GPT2 {
 
         // allocate memory for the model parameters
         let mut params = ParameterTensors::allocate(&config);
+        println!("allocated {} MiB for model parameters", params.num_parameters * std::mem::size_of::<FloatX>() / (1024 * 1024));
         let num_parameters = params.num_parameters;
 
         // read in the parameters if weight_init is true
@@ -485,7 +529,7 @@ impl GPT2 {
         Self {
             config: config,
             params: params,
-            grads_memory: None,
+            grads: None,
             m_memory: None,
             v_memory: None,
             master_weights: None,
@@ -606,7 +650,7 @@ impl GPT2 {
             for i in 0..NUM_PARAMETER_TENSORS {
                 // the layernorm parameters are all initialized to 1
                 if l == 0 && (i == 2 || i == 8 || i == 14) { // only at l = 0 to init these just once
-                    let ones = f32_to_floatx(&vec![1.0f32; param_sizes[i]]);
+                    let ones = vec_f32_to_floatx(&vec![1.0f32; param_sizes[i]]);
                     params_memory_cpu[offset..offset + param_sizes[i]].copy_from_slice(&ones);
                 }
                 // weights tensors are handled here
@@ -630,7 +674,7 @@ impl GPT2 {
                     // okay let's draw the random numbers and write them
                     let mut fp32_buffer = vec![0.0f32; n];
                     normal_(&mut fp32_buffer, 0.0f32, scale, &mut init_rng);
-                    let floatx_buffer = f32_to_floatx(&fp32_buffer);
+                    let floatx_buffer = vec_f32_to_floatx(&fp32_buffer);
                     params_memory_cpu[offset + layer_offset ..offset + layer_offset  + n].copy_from_slice(&floatx_buffer);
                 }
                 offset += param_sizes[i];
@@ -643,7 +687,7 @@ impl GPT2 {
         Self {
             config: config,
             params: params,
-            grads_memory: None,
+            grads: None,
             m_memory: None,
             v_memory: None,
             master_weights: None,
@@ -673,6 +717,17 @@ impl GPT2 {
         })
 
     }
+
+    fn get_layer_params<T: DeviceCopy>(memory: DeviceSlice<T>, layer: usize, layer_size: usize) -> DeviceSlice<T> {
+        let offset = layer * layer_size;
+        memory.index(offset..offset + layer_size)
+    }
+
+    fn get_layer_params_raw<T: DeviceCopy>(memory: DeviceSlice<T>, layer: usize, layer_size: usize) -> u64 {
+        GPT2::get_layer_params(memory, layer, layer_size).as_raw_ptr()
+    }
+
+
 
     #[allow(non_snake_case)]
     pub fn forward(&mut self, inputs: &[i32], B: usize, T: usize, stream: &Stream) {
@@ -705,11 +760,80 @@ impl GPT2 {
         let ln1 = if self.recompute < 2 { acts.ln1 } else { acts.lnf };
         unsafe { layernorm_forward(ln1.as_raw_ptr() , acts.ln1_mean.as_raw_ptr(), acts.ln1_rstd.as_raw_ptr(), acts.encoded.as_raw_ptr(), params.ln1w.as_raw_ptr(), params.ln1b.as_raw_ptr(), B as i32, T as i32, C as i32, stream.as_inner());}
 
+        let pre_gelu_default = DevicePointer::<FloatX>::null().as_raw();
+        let gelu_fusion_default = 0;
+
         for l in 0..L {
             // NvtxRange layer_range("Layer", l);
 
-            let residual = if l == 0 { acts.encoded } else { acts.residual3 };
-        
+            let residual = if l == 0 { acts.encoded } else { GPT2::get_layer_params(acts.residual3, l-1, B * T * C) };
+            let residual = residual.as_raw_ptr();
+
+            // get the pointers of the weights for this layer
+            let l_qkvw = GPT2::get_layer_params_raw(params.qkvw, l,  3*C * C);
+            let l_qkvb = GPT2::get_layer_params_raw(params.qkvb, l, 3*C);
+            let l_attprojw = GPT2::get_layer_params_raw(params.attprojw, l, C * C);
+            let l_attprojb = GPT2::get_layer_params_raw(params.attprojb, l, C);
+            let l_ln2w = GPT2::get_layer_params_raw(params.ln2w, l, C);
+            let l_ln2b = GPT2::get_layer_params_raw(params.ln2b, l, C);
+            let l_fcw = GPT2::get_layer_params(params.fcw, l, 4*C * C);
+            let l_fcb = GPT2::get_layer_params(params.fcb, l, 4*C);
+            let l_fcprojw = GPT2::get_layer_params_raw(params.fcprojw, l, C * 4*C);
+            let l_fcprojb = GPT2::get_layer_params_raw(params.fcprojb, l, C);
+
+            // get the pointers of the activations for this layer
+            let l_ln1 = if self.recompute < 2 { GPT2::get_layer_params_raw(acts.ln1, l, B * T * C) } else { acts.lnf.as_raw_ptr() };
+            let l_qkvr = GPT2::get_layer_params_raw(acts.qkvr, l, B * T * 3*C);
+            let l_atty = GPT2::get_layer_params(acts.atty, l, B * T * C);
+            let l_residual2 = GPT2::get_layer_params(acts.residual2, l, B * T * C);
+            let l_ln2 = if self.recompute < 2 { GPT2::get_layer_params(acts.ln2, l, B * T * C) } else { acts.lnf };
+            let l_ln2_mean = GPT2::get_layer_params_raw(acts.ln2_mean, l, B * T);
+            let l_ln2_rstd = GPT2::get_layer_params_raw(acts.ln2_rstd, l, B * T);
+            let l_fch = GPT2::get_layer_params(acts.fch, l, B * T * 4*C);
+            // reuse the same activation buffer at each layer, as we'll re-compute the gelu during backward
+            // very useful because we dramatically reduce VRAM usage, and may be able to fit larger batch size
+            let l_fch_gelu = if self.recompute < 1 { GPT2::get_layer_params(acts.fch_gelu, l, B * T * 4*C) } else { acts.fch_gelu };
+            let l_residual3 = GPT2::get_layer_params(acts.residual3, l, B * T * C);
+            let scratch = acts.output.as_raw_ptr();  // used for non-cudnn attention, fcproj, attproj, etc.
+
+            let mut l_att = GPT2::get_layer_params(acts.att, l, B * NH * T * T);
+
+            // unused parts of attention buffer must be zeroed (T-dependent)
+            if T != self.seq_len {
+                l_att.set_zero().unwrap();
+            }
+            let l_att = l_att.as_raw_ptr();
+
+            unsafe {
+                // these are only needed as scratchpads for the forward pass, but
+                // need not be stored for backward
+                matmul_forward_cublaslt(scratch, l_ln1, l_qkvw, l_qkvb, B as i32, T as i32, C as i32, 3*C as i32, stream.as_inner(), pre_gelu_default, gelu_fusion_default);
+                attention_forward(l_atty.as_raw_ptr(), l_qkvr, l_att, scratch, B as i32, T as i32, C as i32, NH as i32, stream.as_inner());
+                
+                matmul_forward_cublaslt(scratch, l_atty.as_raw_ptr(), l_attprojw, l_attprojb, B as i32, T as i32, C as i32, C as i32, stream.as_inner(), pre_gelu_default, gelu_fusion_default);
+                fused_residual_forward5(l_residual2.as_raw_ptr(), l_ln2.as_raw_ptr(), l_ln2_mean, l_ln2_rstd, residual, scratch, l_ln2w, l_ln2b, (B*T) as i32, C as i32, stream.as_inner());
+                matmul_forward_cublaslt(l_fch_gelu.as_raw_ptr(), l_ln2.as_raw_ptr(), l_fcw.as_raw_ptr(), l_fcb.as_raw_ptr(), B as i32, T as i32, C as i32, 4*C as i32, stream.as_inner(), l_fch.as_raw_ptr(), self.gelu_fusion);
+                matmul_forward_cublaslt(scratch, l_fch_gelu.as_raw_ptr(), l_fcprojw, l_fcprojb, B as i32, T as i32, 4*C as i32, C as i32, stream.as_inner(), pre_gelu_default, gelu_fusion_default);
+            }
+
+            // OK, fusion across blocks.
+            if l+1 != L {
+                let l_ln1 = if self.recompute < 2 { acts.ln1.index((l+1) * B * T * C .. (l+2) * B * T * C) } else { acts.lnf };
+                let l_ln1 = l_ln1.as_raw_ptr();
+                let l_ln1_mean = acts.ln1_mean.index((l+1) * B * T .. (l+2) * B * T).as_raw_ptr();
+                let l_ln1_rstd = acts.ln1_rstd.index((l+1) * B * T .. (l+2) * B * T).as_raw_ptr();
+                let l_ln1w = params.ln1w.index((l+1) * C .. (l+2) * C).as_raw_ptr();
+                let l_ln1b = params.ln1b.index((l+1) * C .. (l+2) * C).as_raw_ptr();
+                unsafe {fused_residual_forward5(l_residual3.as_raw_ptr(), l_ln1, l_ln1_mean, l_ln1_rstd, l_residual2.as_raw_ptr(), scratch, l_ln1w, l_ln1b, (B*T) as i32, C as i32, stream.as_inner());}
+            } else {
+                unsafe {fused_residual_forward5(l_residual3.as_raw_ptr(), acts.lnf.as_raw_ptr(), acts.lnf_mean.as_raw_ptr(), acts.lnf_rstd.as_raw_ptr(), l_residual2.as_raw_ptr(), scratch,
+                                        params.lnfw.as_raw_ptr(), params.lnfb.as_raw_ptr(),
+                                        (B * T) as i32, C as i32, stream.as_inner());}
+            }
+        }
+
+        unsafe { matmul_forward_cublaslt(acts.output.as_raw_ptr(), acts.lnf.as_raw_ptr(), params.wte.as_raw_ptr(), DevicePointer::<FloatX>::null().as_raw(), B as i32, T as i32, C as i32, Vp as i32, stream.as_inner(), pre_gelu_default, gelu_fusion_default);}
+        stream.synchronize().unwrap();
     }
 
     // Forwards both the model and the loss and is used for validation splits and evals.
@@ -729,15 +853,13 @@ impl GPT2 {
         // fused classifier: does the forward pass and first part of the backward pass
         let dloss = 1.0f32 / (B * T) as f32; // results in the uniform average loss over all elements
         // note: we don't need to generate dlogits here
-        acts.losses.set_zero();
+        acts.losses.set_zero().unwrap();
         self.targets.as_mut().unwrap().copy_from(targets).unwrap();
         GPT2::check_tokens(targets, V);
-        unsafe {cuda_launchers::fused_classifier(
-            acts.output.as_raw_ptr(), acts.losses.as_raw_ptr(), dloss, self.targets.as_ref().unwrap().as_raw_ptr(),
-             B as i32, T as i32, V as i32, Vp as i32, false, stream.as_inner());}
-
+        k_fused_classifier(&mut acts.output, &mut acts.losses, dloss, &self.targets.as_ref().unwrap(),
+             B, T, V, Vp, false, stream);
         let cpu_losses = self.cpu_losses.as_deref_mut().unwrap();
-        acts.losses.copy_to(cpu_losses);
+        acts.losses.copy_to(cpu_losses).unwrap();
         for i in 0..B*T {
             mean_loss += cpu_losses[i];
         }
@@ -747,8 +869,204 @@ impl GPT2 {
         mean_loss
     }
 
-    pub fn backward_and_reduce(&mut self, inputs: &DeviceBuffer<i32>, targets: &DeviceBuffer<i32>, grad_accum_steps: usize, micro_step: usize) {
+    #[allow(non_snake_case)]
+    pub fn backward_and_reduce(&mut self, inputs: &[i32], targets: &[i32], grad_accum_steps: usize, micro_step: usize, stream: &Stream) {
+        if self.grads.is_none() {
+            panic!("Need to allocate gradients before backward");
+        }
 
+        //NVTX_RANGE_FN();
+        let params = &mut self.params;
+        let grads = self.grads.as_mut().unwrap();
+        let acts = self.acts.as_mut().unwrap();
+        let d_targets = self.targets.as_mut().unwrap();
+
+        let last_step = micro_step == grad_accum_steps - 1;
+        // on the first micro-step zero the gradients, as we're about to += accumulate into them
+        if micro_step == 0 {
+            // there are currently two state vars during the gradient accumulation inner loop:
+            // 1) the losses accumulate += into acts.losses, reset here
+            // 2) the gradients accumulate += into grads_memory, reset here
+            acts.losses.set_zero().unwrap();
+            grads.memory.set_zero().unwrap();
+        }
+
+        // convenience shortcuts, size_t instead of int so that pointer arithmetics don't overflow
+        let B = self.batch_size;
+        let T = self.seq_len;
+        let V = self.config.vocab_size;
+        let Vp = self.config.padded_vocab_size;
+        let L = self.config.num_layers;
+        let NH = self.config.num_heads;
+        let C = self.config.channels;
+
+        // accumulate the losses inside acts.losses, and kick off the backward pass inside the fused classifier
+        //NvtxRange classifier_and_loss_range("classifier_and_loss");
+        let dloss = 1.0f32 / (B * T * grad_accum_steps) as f32; // results in the uniform average loss over all elements
+        d_targets.copy_from(targets).unwrap();
+        GPT2::check_tokens(targets, V);
+        k_fused_classifier(&mut acts.output, &mut acts.losses, dloss, &d_targets, B, T, V, Vp, true, stream);
+        
+        // backward pass: go in the reverse order of the forward pass, and call backward() functions
+
+        // reset residual stream gradients (put here to work with gradient accumulation)
+        let mut dresidual = acts.scratch_btc; // the main buffer holding the gradient in the backward pass
+        dresidual.set_zero().unwrap();
+
+        // borrow acts.output and call it scratchF
+        // TODO borrow instead to add some safety
+        let scratchF: DevicePointer<f32> = DevicePointer::from_raw(acts.output.as_device_ptr().as_raw());
+        let scratchX = acts.output.as_raw_ptr();
+        let null_floatx = DevicePointer::<FloatX>::null().as_raw();
+        let pre_gelu = null_floatx;
+        let gelu_fusion = 1;
+        
+        // we kick off the chain rule by filling in dlosses with 1.0f/(B*T)
+        // this was done in the fused classifier kernel as last step of forward pass
+        // technically that is a small, inline backward() pass of calculating
+        // total, final loss as the mean over all losses over all (B,T) positions in the batch
+        // next: backward the classifier matmul
+        unsafe { matmul_backward(acts.scratch_bt4c.as_raw_ptr(), grads.wte.as_raw_ptr(), null_floatx, acts.output.as_raw_ptr(), acts.lnf.as_raw_ptr(), params.wte.as_raw_ptr(), null_floatx, B as i32, T as i32, C as i32, Vp as i32, stream.as_inner(), pre_gelu, gelu_fusion);}
+        // backward the final layernorm
+        let mut residual =  GPT2::get_layer_params_raw(acts.residual3, L-1,  B * T * C);
+        unsafe { layernorm_backward(dresidual.as_raw_ptr(), grads.lnfw.as_raw_ptr(), grads.lnfb.as_raw_ptr(), scratchF.as_raw(), acts.scratch_bt4c.as_raw_ptr(), residual, params.lnfw.as_raw_ptr(), acts.lnf_mean.as_raw_ptr(), acts.lnf_rstd.as_raw_ptr(), B as i32, T as i32, C as i32, stream.as_inner());}
+
+        // from this point on, we no longer need the values stored in the last residual, so we can reuse that memory as generic
+        // scratch for backward computations
+        let dl_btc = residual;
+
+        // now backward all the layers
+        for l in (0..L).rev() {
+            //NvtxRange layer_range("Layer", l);
+
+            residual = if l == 0 { acts.encoded.as_raw_ptr() } else { GPT2::get_layer_params_raw(acts.residual3, l-1, B*T*C) };
+
+            // get the pointers of the weights for this layer
+            let l_ln1w = GPT2::get_layer_params_raw(params.ln1w, l, C);
+            let l_ln1b = GPT2::get_layer_params_raw(params.ln1b, l, C);
+            let l_qkvw = GPT2::get_layer_params_raw(params.qkvw, l, 3*C * C);
+            let l_attprojw = GPT2::get_layer_params_raw(params.attprojw, l, C * C);
+            let l_ln2w = GPT2::get_layer_params_raw(params.ln2w, l, C);
+            let l_ln2b = GPT2::get_layer_params_raw(params.ln2b, l, C);
+            let l_fcw = GPT2::get_layer_params_raw(params.fcw, l, 4*C * C);
+            let l_fcprojw = GPT2::get_layer_params_raw(params.fcprojw, l, C * 4*C);
+            // get the pointers of the gradients of the weights for this layer
+            let dl_ln1w = GPT2::get_layer_params_raw(grads.ln1w, l, C);
+            let dl_ln1b = GPT2::get_layer_params_raw(grads.ln1b, l, C);
+            let dl_qkvw = GPT2::get_layer_params_raw(grads.qkvw, l, 3*C * C);
+            let dl_qkvb = GPT2::get_layer_params_raw(grads.qkvb, l, 3*C);
+            let dl_attprojw = GPT2::get_layer_params_raw(grads.attprojw, l, C * C);
+            let dl_attprojb = GPT2::get_layer_params_raw(grads.attprojb, l, C);
+            let dl_ln2w = GPT2::get_layer_params_raw(grads.ln2w, l, C);
+            let dl_ln2b = GPT2::get_layer_params_raw(grads.ln2b, l, C);
+            let dl_fcw = GPT2::get_layer_params_raw(grads.fcw, l, 4*C * C);
+            let dl_fcb = GPT2::get_layer_params_raw(grads.fcb, l, 4*C);
+            let dl_fcprojw = GPT2::get_layer_params_raw(grads.fcprojw, l, C * 4*C);
+            let dl_fcprojb = GPT2::get_layer_params_raw(grads.fcprojb, l, C);
+            // get the pointers of the activations for this layer
+            let l_ln1 = if self.recompute < 2 { GPT2::get_layer_params_raw(acts.ln1, l, B * T * C) } else { acts.lnf.as_raw_ptr() };
+            let l_ln1_mean = GPT2::get_layer_params_raw(acts.ln1_mean, l, B * T);
+            let l_ln1_rstd = GPT2::get_layer_params_raw(acts.ln1_rstd, l, B * T);
+            let l_qkvr = GPT2::get_layer_params_raw(acts.qkvr, l, B * T * 3*C);
+            let l_atty = GPT2::get_layer_params_raw(acts.atty, l, B * T * C);
+            let l_residual2 = GPT2::get_layer_params_raw(acts.residual2, l, B * T * C);
+            let l_ln2 = if self.recompute < 2 { GPT2::get_layer_params_raw(acts.ln2, l, B * T * C) } else { acts.lnf.as_raw_ptr() };
+            let l_ln2_mean = GPT2::get_layer_params_raw(acts.ln2_mean, l, B * T);
+            let l_ln2_rstd = GPT2::get_layer_params_raw(acts.ln2_rstd, l, B * T);
+            let l_fch_pre_gelu = GPT2::get_layer_params_raw(acts.fch, l, B * T * 4*C);
+            let l_fch_gelu = if self.recompute < 1 { GPT2::get_layer_params_raw(acts.fch_gelu, l, B * T * 4*C) } else { acts.fch_gelu.as_raw_ptr() };
+            // get the pointers of the gradients of the activations for this layer
+            // notice that there is no l *, because we just have a single copy, and keep
+            // re-using this memory in every Transformer block as we calculate backward pass
+            let dl_bt4c = acts.scratch_bt4c.as_raw_ptr();
+
+            let default_pre_gelu = null_floatx;
+            let default_gelu_fusion = 0;
+
+            unsafe { 
+                if self.recompute >= 1 {
+                    // recompute >= 1 means we recompute gelu. in this case,
+                    // l_fch_gelu is just a buffer, so re-compute the gelu from l_fch here
+                    gelu_forward(l_fch_gelu, l_fch_pre_gelu, (B*T*4*C) as i32, stream.as_inner());
+                }
+                matmul_backward(dl_bt4c, dl_fcprojw, dl_fcprojb, dresidual.as_raw_ptr(), l_fch_gelu, l_fcprojw, scratchF.as_raw(), B as i32, T as i32 , 4*C as i32, C as i32, stream.as_inner(), l_fch_pre_gelu, self.gelu_fusion);
+                if self.recompute >= 2 {
+                    // same as gelu above, l_ln1 and l_ln2 are just buffers if recompute >= 2, recompute them here on demand
+                    layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B as i32, T as i32, C as i32, stream.as_inner());
+                }
+                matmul_backward(dl_btc, dl_fcw, dl_fcb, dl_bt4c, l_ln2, l_fcw, scratchF.as_raw(), B as i32, T as i32, C as i32, (4 * C)  as i32, stream.as_inner(), default_pre_gelu, default_gelu_fusion);
+                // layernorm backward does += to the dresidual, so it correctly accumulates grad from the MLP block above
+                layernorm_backward(dresidual.as_raw_ptr(), dl_ln2w, dl_ln2b, scratchF.as_raw(), dl_btc, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, B as i32, T as i32, C as i32, stream.as_inner());
+                matmul_backward(dl_btc, dl_attprojw, dl_attprojb, dresidual.as_raw_ptr(), l_atty, l_attprojw, scratchF.as_raw(), B as i32, T as i32, C as i32, C as i32, stream.as_inner(), default_pre_gelu, default_gelu_fusion);
+                let l_att = GPT2::get_layer_params(acts.att, l,  B * NH * T * T);
+                // we need B x T x (4)C buffers. l_atty and l_fch aren't needed anymore at this point, so reuse their memory
+                let buffer_a = l_atty;
+                let buffer_b = l_fch_pre_gelu;
+                attention_backward(dl_bt4c, buffer_b, scratchX, buffer_a, dl_btc, l_qkvr, l_att.as_raw_ptr(), B as i32, T as i32, C as i32, NH as i32, stream.as_inner());
+
+                if self.recompute >= 2 {
+                    layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B as i32, T as i32, C as i32, stream.as_inner());
+                }
+                // QKV parameter gradients
+                matmul_backward(dl_btc, dl_qkvw, dl_qkvb, dl_bt4c, l_ln1, l_qkvw, scratchF.as_raw(), B as i32, T as i32, C as i32, (3 * C)  as i32, stream.as_inner(), default_pre_gelu, default_gelu_fusion);
+                // layernorm backward does += to dresidual, so it correctly accumulates gradient for the Attention block above
+                layernorm_backward(dresidual.as_raw_ptr(), dl_ln1w, dl_ln1b, scratchF.as_raw(), dl_btc, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, B as i32, T as i32, C as i32, stream.as_inner());
+
+                // Accumulate gradients from this layer in a background stream.
+                // TODO
+                //multi_gpu_async_reduce_gradient(pointers, nelem, &multi_gpu_config, main_stream);
+                
+            }
+        }
+        use libc::{c_int, c_void};
+
+        unsafe {encoder_backward(grads.wte.as_raw_ptr() as *mut c_void, grads.wpe.as_raw_ptr() as *mut c_void, scratchX as *mut c_void, self.workload_indices.as_ref().unwrap().as_ptr() as *mut c_int, self.bucket_info.as_ref().unwrap().as_ptr() as *mut Int4,
+            dresidual.as_raw_ptr() as *const c_void, self.inputs.as_ref().unwrap().as_raw_ptr() as *const c_void, inputs.as_ptr() as *const c_int, B as i32, T as i32, C as i32, sampler::random_u32(&mut self.rng_state), stream.as_inner() as *mut c_void);}
+
+        // Aggregate all gradients that are not part of the transformer blocks
+        if last_step {
+            // reduce all the losses within the current GPU (across all microsteps)
+            unsafe {global_sum_deterministic_float(self.accumulated_mean_loss.as_ref().unwrap().as_raw_ptr(), acts.losses.as_raw_ptr(), (B*T) as i32, stream.as_inner());}
+            
+            self.accumulated_mean_loss.as_mut().unwrap().copy_dtoh().unwrap();
+            self.mean_loss = **self.accumulated_mean_loss.as_ref().unwrap();
+            //TODO multi GPU
+        }
+
+        if last_step {
+            self.mean_loss /= (B*T*grad_accum_steps) as f32;
+        } else {
+            self.mean_loss = -1.0f32; // no loss available yet
+        }
+        
+    }
+
+    pub fn calculate_grad_norm(&self, multi_gpu_config: &MultiGpuConfig, stream: &Stream) -> f32 {
+        //NVTX_RANGE_FN();
+        
+        let grads_memory = self.grads.as_ref().unwrap().memory.as_device_ptr();
+        
+        let mut grad_norm_squared_cpu = [0.0f32; 1];
+
+        let num_slices: [i32; 2] = [1, self.config.num_layers as i32];
+        let max_num_block_sums = unsafe {get_max_num_block_sums(num_slices.as_ptr(), 2)};
+
+        // FIXME keep that buffer allocated
+        let grad_norm_squared = DeviceBuffer::<f32>::zeroed(max_num_block_sums as usize).unwrap();
+
+        if multi_gpu_config.zero_stage == 1 {
+            panic!("multi gpu is not supported");
+        } else {
+            // in regular DDP, backward has averaged the gradients across all GPUs
+            // so each GPU can compute the squared norm over the whole grad vector, with no added comms needed
+            unsafe {
+                global_norm_squared(grad_norm_squared.as_device_ptr(), grads_memory, self.num_parameters, 0, 1, max_num_block_sums, true, stream.as_inner());
+                global_sum_deterministic_float(grad_norm_squared.as_raw_ptr(), grad_norm_squared.as_raw_ptr(), max_num_block_sums, stream.as_inner());
+            }
+        }
+
+        grad_norm_squared.index(0).copy_to(&mut grad_norm_squared_cpu).unwrap();
+        grad_norm_squared_cpu[0].sqrt()
     }
 
     pub fn update(&mut self, learning_rate: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32, grad_scale: f32, t: i32, init_from_master_only: bool, stream: &Stream) {
@@ -758,8 +1076,7 @@ impl GPT2 {
         // also, this function was very simple a while back but become very complex, only because we want to
         // selectively weight decay some, but not all tensors :(
         // TODO: revisit and probably refactor this entire function
-
-        if self.grads_memory.is_none() || self.m_memory.is_none() || self.v_memory.is_none() {
+        if self.grads.is_none() || self.m_memory.is_none() || self.v_memory.is_none() {
             panic!("Need to allocate optimizer state before update");
         }
 
@@ -769,15 +1086,15 @@ impl GPT2 {
         // save RNG state at this point so we can round from master weights identically when restoring from a checkpoint
         self.rng_state_last_update = self.rng_state;
 
-        for i in 0..NUM_PARAMETER_TENSORS {
+        for tensor_id in 0..NUM_PARAMETER_TENSORS {
             let seed = sampler::random_u32(&mut self.rng_state);
 
             let mut num_layers = self.config.num_layers;
-            if i < 2 || i > 13 {
+            if tensor_id < 2 || tensor_id > 13 {
                 num_layers = 1;
             }
 
-            let tensor = self.get_tensor_at_layer(0, i);
+            let tensor = self.get_tensor_at_layer(0, tensor_id);
             let shard = ShardInfo{ offset: 0, size: tensor.size};
             let local_offset_full = tensor.offset + shard.offset;
 
@@ -786,9 +1103,9 @@ impl GPT2 {
             // in particular this also decays the embedding weights, but this is ok:
             // - the token embeddings are weight shared and participate in the final projection to logits
             // - the position embeddings actively participate at every forward/backward pass
-            let wd = if i == 0 || i == 1 || i == 4 || i == 6 || i == 10 || i == 12 { weight_decay } else { 0.0f32 };
+            let wd = if tensor_id == 0 || tensor_id == 1 || tensor_id == 4 || tensor_id == 6 || tensor_id == 10 || tensor_id == 12 { weight_decay } else { 0.0f32 };
             let param_ptr = unsafe { self.params.memory.as_device_ptr().offset(local_offset_full as isize)};
-            let grad_ptr = unsafe {self.grads_memory.as_ref().unwrap().as_device_ptr().offset(local_offset_full as isize)};
+            let grad_ptr = unsafe {self.grads.as_ref().unwrap().memory.as_device_ptr().offset(local_offset_full as isize)};
 
             let opt_state_offset = local_offset_full;
             let m_ptr = unsafe {self.m_memory.as_ref().unwrap().as_device_ptr().offset(opt_state_offset as isize)};
@@ -801,19 +1118,18 @@ impl GPT2 {
 
             if init_state && self.master_weights.is_some() {
                 let grid_size = shard.size.div_ceil(512);
-                let num_layers = self.config.num_layers;
                 unsafe {
-                    cuda_launchers::copy_and_cast(master_ptr.as_raw(), param_ptr.as_raw(), shard.size, shard.size, tensor.size, grid_size, num_layers, stream.as_inner());
+                    copy_and_cast(master_ptr.as_raw(), param_ptr.as_raw(), shard.size, shard.size, tensor.size, grid_size, num_layers, stream.as_inner());
                 }
             }
             
             if init_from_master_only {
                 // when resuming training from a checkpoint with master weights (allows changing precision)
-                unsafe { cuda_launchers::init_from_master(param_ptr.as_raw(), master_ptr.as_raw(), shard.size, tensor.size, shard.size, num_layers, seed, stream.as_inner());}
+                unsafe { init_from_master(param_ptr.as_raw(), master_ptr.as_raw(), shard.size, tensor.size, shard.size, num_layers, seed, stream.as_inner());}
             } else {
                 // ok finally call the kernel to update the weights with AdamW
                 unsafe {
-                    cuda_launchers::adamw_update(param_ptr.as_raw(), master_ptr.as_raw(), grad_ptr.as_raw(),
+                    adamw_update(param_ptr.as_raw(), master_ptr.as_raw(), grad_ptr.as_raw(),
                         m_ptr.as_raw(), v_ptr.as_raw(),
                         shard.size, tensor.size, tensor.size, shard.size, num_layers,
                         learning_rate,
@@ -844,27 +1160,76 @@ impl GPT2 {
 
         return ShardInfo { offset: offset, size: size }
     }
+
+
+    pub fn estimate_mfu(&self, _tokens_processed: usize, _time_elapsed: f32) -> f32 {
+        // TODO
+        -1.0f32
+    }
+
 }
 
 
-
-
-
-
 fn common_start(_override_enable_tf32: bool) -> cust::error::CudaResult<Stream> {
-    let _context = cust::quick_init()?;
     let device_idx = 0;
-    let _device = Device::get_device(device_idx)?;
-    println!("Device #{}, Name: {}", device_idx, _device.name()?);
+    let device = Device::get_device(device_idx)?;
+    println!("Device #{}, Name: {}", device_idx, device.name()?);
 
-    // TODO setup cublas
+    unsafe { cublas_init() };
 
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
     Ok(stream)
 }
 
-fn save_state() {
+fn save_state(filename: &str, step: i32, model: &GPT2, loader: &Dataloader, stream: &Stream) {
+    println!("Writing state to {}", filename);
+    let mut state_file = File::create(filename).expect("Failed to create state file");
+    
+    let mut state_header = [0i32; 256];
+    // basic identifying information
+    state_header[0] = 20240527; // magic number
+    state_header[1] = 1; // version number
+    state_header[2] = 1; // number of processes - TODO: multi_gpu_config.num_processes
+    state_header[3] = 0; // rank of this process - TODO: multi_gpu_config.process_rank
+    state_header[4] = i32::from(model.use_master_weights);  // whether we're using fp32 master weights
+    state_header[5] = i32::from(loader.should_shuffle); // shuffle state of the dataloader
+    // int main state, start at 10 to leave some padding
+    state_header[10] = step; // step of the optimization
+    // model rng state, start at 20 to leave some padding
+    write_u64_as_i32s(&mut state_header, 20, model.rng_state);
+    write_u64_as_i32s(&mut state_header, 22, model.rng_state_last_update);
+    // dataloader state, start at 30 to leave some padding
+    write_u64_as_i32s(&mut state_header, 30, 0usize as u64); // TODO: loader.current_shard_idx
+    write_u64_as_i32s(&mut state_header, 32, 0usize as u64); // TODO: loader.current_sample_idx
+    
+    // Write header
+    state_file.write_all(bytemuck::cast_slice(&state_header)).expect("Failed to write state header");
 
+    // write AdamW m, v, and master_weights here (they are all float)
+    let buf_size = 32 * 1024 * 1024 / std::mem::size_of::<f32>(); // IO_BUF_SIZE
+    
+    if let Some(ref m_memory) = model.m_memory {
+        llm_rs::utils::device_to_file(&mut state_file, m_memory.as_slice(), buf_size, &stream);
+    }
+    if let Some(ref v_memory) = model.v_memory {
+        llm_rs::utils::device_to_file(&mut state_file, v_memory.as_slice(), buf_size, &stream);
+    }
+    if model.use_master_weights {
+        if let Some(ref master_weights) = model.master_weights {
+            llm_rs::utils::device_to_file(&mut state_file, master_weights.as_slice(), buf_size, &stream);
+        }
+    }
+
+    // write dataloader state if we are using the Permuted version of it
+    if loader.should_shuffle {
+        let shuffling_state = loader.save_shuffling_state().unwrap();
+        state_file.write_all(bytemuck::cast_slice(&[shuffling_state.total_files])).unwrap();
+        state_file.write_all(bytemuck::cast_slice(&shuffling_state.shard_indices)).unwrap();
+        state_file.write_all(bytemuck::cast_slice(&[shuffling_state.shard_num_samples])).unwrap();
+        state_file.write_all(bytemuck::cast_slice(&shuffling_state.intra_shard_indices)).unwrap();
+        let c_mt19937_state = llm_rs::random::to_c_state(&shuffling_state.restored_rng);
+        state_file.write_all(bytemuck::cast_slice(&[c_mt19937_state])).unwrap();
+    }
 }
 
 
@@ -889,7 +1254,6 @@ fn load_state(step: &mut i32, model: &mut GPT2, loader: &mut Dataloader, filenam
 
     // read AdamW m, v, master_weights (they are all float)
     // allocate all the needed memory as necessary
-    let shard_num_parameters = model.num_parameters; // TODO: multi_gpu_config.shard_num_parameters
     if use_master_weights == 1 && !model.use_master_weights {
         println!("Warning: Master weights are present in state, but not enabled for current run.");
     } else if use_master_weights == 0 && model.use_master_weights {
@@ -917,33 +1281,83 @@ fn load_state(step: &mut i32, model: &mut GPT2, loader: &mut Dataloader, filenam
     }
 
     // revive the DataLoader object and its state
-    // TODO: Set should_shuffle state - need to add public method to Dataloader
     if should_shuffle == 1 {
-        // ensure the number of shards matches
-        let mut total_files: usize = 0;
-        state_file.read_exact(bytemuck::cast_slice_mut(&mut [total_files])).expect("Failed to read glob_result_gl_pathc");
-        // read the shard indices
+        let total_files: usize = 0;
+        state_file.read_exact(bytemuck::cast_slice_mut(&mut [total_files])).unwrap();
         let mut shard_indices = vec![0i32; total_files];
-        state_file.read_exact(bytemuck::cast_slice_mut(&mut shard_indices)).expect("Failed to read shard_indices");
-        // ensure the number of samples matches
-        let mut shard_num_samples: usize = 0;
-        state_file.read_exact(bytemuck::cast_slice_mut(&mut [shard_num_samples])).expect("Failed to read shard_num_samples");
-        // read the intra-shard indices
+        state_file.read_exact(bytemuck::cast_slice_mut(&mut shard_indices)).unwrap();
+        let shard_num_samples: usize = 0;
+        state_file.read_exact(bytemuck::cast_slice_mut(&mut [shard_num_samples])).unwrap();
         let mut intra_shard_indices = vec![0i32; shard_num_samples];
-        state_file.read_exact(bytemuck::cast_slice_mut(&mut intra_shard_indices)).expect("Failed to read intra_shard_indices");
-        // read the shuffle rng state
-        let mut c_mt19937_state = llm_rs::random::CMt19937State::default();
-        state_file.read_exact(bytemuck::cast_slice_mut(&mut [c_mt19937_state])).expect("Failed to read shuffle_rng state");
-        
+        state_file.read_exact(bytemuck::cast_slice_mut(&mut intra_shard_indices)).unwrap();
+        let c_mt19937_state = llm_rs::random::CMt19937State::default();
+        state_file.read_exact(bytemuck::cast_slice_mut(&mut [c_mt19937_state])).unwrap();
         // Restore the random generator state from the C struct
         let restored_rng = llm_rs::random::from_c_state(&c_mt19937_state);
         
-        loader.resume_shuffling(total_files, shard_indices, shard_num_samples, intra_shard_indices, restored_rng);
+        let shuffling_state = llm_rs::dataloader::ShufflingState {
+            total_files,
+            shard_indices,
+            shard_num_samples,
+            intra_shard_indices,
+            restored_rng,
+        };
+        loader.resume_shuffling(shuffling_state);
     }
     loader.resume(current_shard_idx, current_sample_idx);
 
     // all done
 }
+
+
+// Write checkpoint function that mirrors the C version
+fn write_checkpoint(output_log_dir: &str, step: i32, model: &GPT2, train_loader: &Dataloader, multi_gpu_config: &MultiGpuConfig, stream: &Stream) {
+    // a checkpoint contains: model weights, optimizer/dataloader state, and a DONE file
+    println!("Writing checkpoint at step {}", step);
+    let rank = multi_gpu_config.process_rank;
+    
+    // only rank 0 writes the model file because it is the same across all ranks
+    if rank == 0 {
+        let model_filename = format!("{}/model_{:08}.bin", output_log_dir, step);
+        model.write_checkpoint(&model_filename);
+    }
+    
+    // all ranks write their state file
+    let state_filename = format!("{}/state_{:08}_{:05}.bin", output_log_dir, step, rank);
+    save_state(&state_filename, step, model, train_loader, &stream);
+    
+    // DONE file is a signal that this checkpoint as a whole is complete
+    // multi_gpu_barrier(multi_gpu_config);
+    if rank == 0 {
+        let done_filename = format!("{}/DONE_{:08}", output_log_dir, step);
+        let _done_file = File::create(&done_filename).expect("Failed to create DONE file");
+    }
+}
+
+// Delete checkpoint function
+fn delete_checkpoint(output_log_dir: &str, step: i32, multi_gpu_config: &MultiGpuConfig) {
+    // mirrors write_checkpoint function, cleans up checkpoint from disk
+    println!("Deleting checkpoint at step {}", step);
+
+    let rank = multi_gpu_config.process_rank;
+    
+    // Delete model file (only rank 0)
+    if rank == 0 {
+        let model_filename = format!("{}/model_{:08}.bin", output_log_dir, step);
+        let _ = std::fs::remove_file(&model_filename);
+    }
+    
+    // Delete state file (all ranks)
+    let state_filename = format!("{}/state_{:08}_{:05}.bin", output_log_dir, step, rank);
+    let _ = std::fs::remove_file(&state_filename);
+    
+    // Delete DONE file (only rank 0)
+    if rank == 0 {
+        let done_filename = format!("{}/DONE_{:08}", output_log_dir, step);
+        let _ = std::fs::remove_file(&done_filename);
+    }
+}
+
 
 #[derive(Parser, Debug)]
 #[command(name = "train_gpt2_cuda")]
@@ -1064,18 +1478,21 @@ struct Args {
 }
 
 #[allow(non_snake_case)]
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // read in the (optional) command line arguments
     let args = Args::parse();
 
     let B = args.batch_size;
     let T = args.seq_len;
 
-
+    let _context = cust::quick_init()?;
     // multi_gpu_config = multi_gpu_config_init(num_processes, process_rank, gpus_per_node, server_ip, fs_path, nccl_init_method);
     let stream = common_start(args.override_enable_tf32).expect("CUDA init failed");
 
     let num_processes = args.num_processes;
+    
+    // Create a simple multi_gpu_config for checkpoint functionality
+    let multi_gpu_config = MultiGpuConfig::new(args.process_rank, num_processes, args.zero_stage);
 
     // should do a bit more error checking here
     assert!(args.warmup_iterations >= 0);
@@ -1121,7 +1538,7 @@ fn main() {
     println!("| genT                  | {:<50} |", args.gen_t);
     println!("| overfit_single_batch  | {:<50} |", args.overfit_single_batch);
     println!("| use_master_weights    | {:<50} |", if args.use_master_weights { "enabled" } else { "disabled" });
-    println!("| gelu_fusion           | {:<50} |", args.gelu_fusion);
+    println!("| gelu_fusion           | {:<50} |", gelu_fusion);
     println!("| recompute             | {:<50} |", args.recompute);
     println!("+-----------------------+----------------------------------------------------+");
     // println!("| device                | {:<50} |", deviceProp.name);
@@ -1181,7 +1598,7 @@ fn main() {
         // sensible default is to train for exactly one epoch
         let ntok = train_loader.num_tokens;
         // the number of (outer loop) steps each process should take for us to reach one epoch
-        train_num_batches = ntok as i32/ args.total_batch_size;
+        train_num_batches = ntok as i32/ total_batch_size;
     }
     // figure out the number of validation steps to run for
     let mut val_num_batches = args.val_max_steps; // passed in from command line
@@ -1200,7 +1617,7 @@ fn main() {
     let hellaswag_available = std::path::Path::new(hellaswag_path).exists();
     let run_hellaswag = args.hellaswag_eval != 0 && hellaswag_available;
 
-    let eval_loader = if run_hellaswag {
+    let mut eval_loader = if run_hellaswag {
         Some(EvalLoader::init(hellaswag_path, B, T, 0, 1))
     } else {  None } ;
     
@@ -1219,8 +1636,7 @@ fn main() {
         println!("You can run `python dev/data/hellaswag.py` to export and use it with `-h 1`.");
     }
     // more prints related to allocations from gpt2_build_from_checkpoint down here to not mess up our table above
-    println!("num_parameters: {} => bytes: {}", model.num_parameters, model.num_parameters * std::mem::size_of::<f32>());
-    println!("allocated {} MiB for model parameters", (model.num_parameters * std::mem::size_of::<f32>() / (1024 * 1024)) as i32);
+    println!("num_parameters: {}", model.num_parameters);
     // few more prints for gradient accumulation math up above
     println!("batch_size B={} * seq_len T={} * num_processes={} and total_batch_size={}", B, T, args.num_processes, args.total_batch_size);
     println!("=> setting grad_accum_steps={}", grad_accum_steps);
@@ -1229,7 +1645,7 @@ fn main() {
     // if (multi_gpu_config.process_rank == 0) { create_dir_if_not_exists(output_log_dir); }
     //let mut logger = Logger::default();
     // logger_init(&logger, output_log_dir, multi_gpu_config.process_rank, resume);
-    if args.process_rank == 0 { std::fs::create_dir_all(args.output_log_dir.as_deref().unwrap()).unwrap(); }
+    if args.process_rank == 0 && args.output_log_dir.is_some() { std::fs::create_dir_all(args.output_log_dir.as_deref().unwrap())?; }
     let logger = Logger::init(args.output_log_dir.as_deref(), args.process_rank, resuming).expect("Failed to initialize logger");
 
     // set up the Tokenizer
@@ -1258,8 +1674,8 @@ fn main() {
     }
 
     // init an OutlierDetector the training loss
-    let loss_outlier_detector = OutlierDetector::new();
-    let grad_norm_outlier_detector = OutlierDetector::new();
+    let mut loss_outlier_detector = OutlierDetector::new();
+    let mut grad_norm_outlier_detector = OutlierDetector::new();
 
     // do some checks here before we kick off training
     // cross-check the desired sequence length T with the model's max sequence length
@@ -1301,12 +1717,13 @@ fn main() {
             val_loss /= val_num_batches as f32;
             // val_loss = multi_gpu_cpu_float_sum(val_loss, &multi_gpu_config) / multi_gpu_config.num_processes;
             println!("val loss {}", val_loss);
-            logger.log_val(step, val_loss);
+            logger.log_val(step, val_loss)?;
         }
 
         // once in a while estimate HellaSwag accuracy (all processes collaborate)
         if run_hellaswag && ((step > 0 && step % args.val_loss_every == 0) || last_step) {
-            let eval_loader = eval_loader.as_ref().unwrap();
+            println!("HellaSwag");
+            let eval_loader = eval_loader.as_mut().ok_or("eval_loader is None")?;
             // NvtxRange evaluation_range("evaluation");
             let mut eval_acc_norm = 0.0f32;
             eval_loader.reset();
@@ -1320,7 +1737,7 @@ fn main() {
             // careful because not all ranks may have the exact same allocation of number of examples
             // eval_acc_norm = multi_gpu_cpu_float_sum(eval_acc_norm, &multi_gpu_config);
             println!("HellaSwag: {}/{} = {}", eval_acc_norm as i32, eval_loader.num_examples, eval_acc_norm / eval_loader.num_examples as f32);
-            logger.log_eval(step, eval_acc_norm / eval_loader.num_examples as f32);
+            logger.log_eval(step, eval_acc_norm / eval_loader.num_examples as f32)?;
         }
 
         // once in a while do model inference to print generated text (only rank 0)
@@ -1346,10 +1763,13 @@ fn main() {
                 // on cuDNN 9.2.1 with cuDNN FrontEnd 1.5.2, T >= 256 seems bit-for-bit identical
                 // (but even if it wasn't fully identical that's probably not the end of the world)
                 // note this is still somewhat wasteful because we don't have a KV cache!
-                model.forward(gen_tokens.as_slice(), 1, min(T,256).div_ceil(t as usize) * min(T,256));
+                let t_max_256 = min(T,256);
+                let t_gen = (t as usize).div_ceil(t_max_256) * t_max_256;
+                model.forward(gen_tokens.as_slice(), 1, t_gen, &stream);
                 // get the V-dimensional vector probs[0, t-1, :]
-                let logits = model.acts.as_ref().unwrap().output.index(((t as usize - 1) * model.config.padded_vocab_size) .. (t as usize * model.config.padded_vocab_size));
-                // move probs back to CPU and sample (note we only move the first vocab_size logits, ignoring the padding)
+                let logits_offset = (t as usize - 1) * model.config.padded_vocab_size;
+                let logits = model.acts.as_ref().unwrap().output.index(logits_offset .. logits_offset + model.config.vocab_size);
+                // move probs back to CPU and sample
                 logits.copy_to(&mut cpu_logits_raw[..model.config.vocab_size]).unwrap();
                 // convert to FP32 into cpu_logits (this does nothing useful if floatX == float)
                 for i in 0..model.config.vocab_size {
@@ -1369,8 +1789,10 @@ fn main() {
 
         // once in a while checkpoint the optimization state (all ranks)
         if (args.checkpoint_every > 0 && args.output_log_dir.is_some() && !resuming) && ((step > 0 && step % args.checkpoint_every == 0) || last_step) {
+            println!("write checkpoint");
             // writes model .bin file, state .bin files, and DONE file for step
-            write_checkpoint(output_log_dir, step, &model, &train_loader, &multi_gpu_config);
+            let output_log_dir = args.output_log_dir.as_ref().unwrap();
+            write_checkpoint(output_log_dir, step, &model, &train_loader, &multi_gpu_config, &stream);
             // we only keep checkpoints_keep checkpoints on disk to save space
             // so now that we wrote a new checkpoint, delete one old one (unless it is a "major" checkpoint)
             // we only do this is checkpoint keeping is turned on (checkpoints_keep > 0)
@@ -1399,20 +1821,20 @@ fn main() {
             // fetch the next data batch
             train_loader.next_batch();
             // forward pass. note that we pass in grad_accum_steps, which scales down the loss
-            model.forward(train_loader.inputs(), B, T);
+            model.forward(train_loader.inputs(), B, T, &stream);
             // backward pass. all model params accumulate gradients with += inside this inner loop
-            model.backward_and_reduce(train_loader.inputs(), train_loader.targets(), grad_accum_steps, micro_step);
+            model.backward_and_reduce(train_loader.inputs(), train_loader.targets(), grad_accum_steps as usize, micro_step as usize, &stream);
         }
         let zloss = loss_outlier_detector.update(model.mean_loss as f64) as f32; // loss z-score
         // fetch the next learning rate
         let step_learning_rate = lr_scheduler.get_learning_rate(step);
         // calculate the gradient norm and how much we wish to scale the gradient
-        let grad_norm = model.calculate_grad_norm(&multi_gpu_config);
+        let grad_norm = model.calculate_grad_norm(&multi_gpu_config, &stream);
         let zgrad = grad_norm_outlier_detector.update(grad_norm as f64) as f32; // grad z-score
         // update the model parameters
-        if (zloss.is_finite() && args.skip_update_lossz != 0.0f32 && zloss > args.skip_update_lossz) {
+        if zloss.is_finite() && args.skip_update_lossz != 0.0f32 && zloss > args.skip_update_lossz {
             println!("skipping update due to loss z-score of {}", zloss);
-        } else if (zgrad.is_finite() && args.skip_update_gradz != 0.0f32 && zgrad > args.skip_update_gradz) {
+        } else if zgrad.is_finite() && args.skip_update_gradz != 0.0f32 && zgrad > args.skip_update_gradz {
             println!("skipping update due to grad z-score of {}", zgrad);
         } else {
             // clip the gradient norm to a maximum value
@@ -1427,10 +1849,10 @@ fn main() {
 
         // todo - move or double-buffer all of this timing logic to avoid idling the GPU at this point!
         let time_elapsed_ms = stop_event.elapsed_time_f32(&start_event).unwrap();
-        let tokens_processed = multi_gpu_config.num_processes * B * T * grad_accum_steps;
-        let tokens_per_second = tokens_processed / time_elapsed_ms * 1000.0f32;
-        let bias_corrected_ema_tokens_per_second = tokens_per_second; // by default set to non-ema version
-        if (step > 0) { // consider the first batch to be a warmup (e.g. cuBLAS/cuDNN initialisation)
+        let tokens_processed = multi_gpu_config.num_processes * B * T * grad_accum_steps as usize;
+        let tokens_per_second = tokens_processed as f32 / time_elapsed_ms * 1000.0f32;
+        let mut bias_corrected_ema_tokens_per_second = tokens_per_second; // by default set to non-ema version
+        if step > 0 { // consider the first batch to be a warmup (e.g. cuBLAS/cuDNN initialisation)
             total_sum_iteration_time_s += time_elapsed_ms / 1000.0f32;
             // smooth out the tok/s with an exponential moving average, and bias correct just like in AdamW
             ema_tokens_per_second = 0.95f32 * ema_tokens_per_second + 0.05f32 * tokens_per_second;
@@ -1441,12 +1863,15 @@ fn main() {
                 step + 1, train_num_batches, model.mean_loss, zloss, grad_norm, zgrad, step_learning_rate,
                 time_elapsed_ms, 100.0*mfu, bias_corrected_ema_tokens_per_second);
         if args.log_gpu_every > 0 && (step + 1) % args.log_gpu_every == 0 {
-            GPUUtilInfo gpu_info = get_gpu_utilization_info();
-            println!("                  compute {:2.1}% | memory: {:2.1}% | fan: {:2}% | {:4} MHz / {:4} MHz | {:3} W / {:3} W | {}°C / {}°C | {}",
-                    gpu_info.gpu_utilization, gpu_info.mem_utilization, gpu_info.fan, gpu_info.clock, gpu_info.max_clock, gpu_info.power / 1000, gpu_info.power_limit / 1000,
-                    gpu_info.temperature, gpu_info.temp_slowdown, gpu_info.throttle_reason);
+            if let Ok(gpu_info) = llm_rs::gpu_monitor::get_gpu_utilization_info() {
+                println!("                  compute {:2.1}% | memory: {:2.1}% | fan: {:2}% | {:4} MHz / {:4} MHz | {:3} W / {:3} W | {}°C / {}°C | {}",
+                        gpu_info.gpu_utilization, gpu_info.mem_utilization, gpu_info.fan, gpu_info.clock, gpu_info.max_clock, gpu_info.power / 1000, gpu_info.power_limit / 1000,
+                        gpu_info.temperature, gpu_info.temp_slowdown, gpu_info.throttle_reason);
+            } else {
+                println!("                  Failed to get GPU utilization info");
+            }
         }
-        logger.log_train(step, model.mean_loss, step_learning_rate, grad_norm);
+        logger.log_train(step, model.mean_loss, step_learning_rate, grad_norm)?;
 
         // disable the profiler after 3 steps of optimization
         if step == 3 { 
@@ -1456,4 +1881,5 @@ fn main() {
     // add a total average, for optimizations that are only mild improvements (excluding 1st batch as warmup)
     println!("total average iteration time: {} ms", total_sum_iteration_time_s / (train_num_batches-1) as f32 * 1000.0);
 
+    Ok(())
 }

@@ -227,6 +227,8 @@ void matmul_cublaslt(floatX* d, const floatX* a, const floatX* b, const floatX* 
     cudaCheck(cudaGetLastError());
 }
 
+
+extern "C" {
 // small wrapper around matmul_cublaslt for the forward pass (keeping historical order of arguments)
 void matmul_forward_cublaslt(floatX* out,
                      floatX* inp, floatX* weight, floatX* bias,
@@ -287,4 +289,6 @@ void matmul_backward(floatX* dinp, floatX* dweight, floatX* dbias,
     // backward to weight, uses += in the backward pass (accumulate the gradient) by setting alpha=one
     matmul_cublaslt(dweight, inp, dout, NULL /*dbias*/, C, OC, B*T, stream, false, true, 0, 0, 0, 0,
                     true /* accumulate */, NULL, true);
+}
+
 }

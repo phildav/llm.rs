@@ -47,6 +47,7 @@ __global__ void gelu_backward_inplace_kernel(floatX* d_in_out, const floatX* inp
 // ----------------------------------------------------------------------------
 // kernel launchers
 
+extern "C" {
 void gelu_forward(floatX* out, const floatX* inp, int N, cudaStream_t stream) {
     NVTX_RANGE_FN();
     const int block_size = 512;
@@ -63,4 +64,5 @@ void gelu_backward_inplace(floatX* d_in_out, const floatX* inp, const int N, cud
     const int grid_size = CEIL_DIV(N, block_size * x128::size);
     gelu_backward_inplace_kernel<<<grid_size, block_size, 0, stream>>>(d_in_out, inp);
     cudaCheck(cudaGetLastError());
+}
 }

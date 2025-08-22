@@ -8,3 +8,5 @@ pub mod logger;
 pub mod sampler;
 pub mod cuda_launchers;
 pub mod outlier_detector;
+pub mod gpu_monitor;
+pub mod debug;

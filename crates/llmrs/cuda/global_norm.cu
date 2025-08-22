@@ -35,35 +35,10 @@ __global__ void global_norm_squared_kernel(float* out, const T* data, size_t cou
     }
 }
 
-__global__ void global_norm_aggregate_kernel(float* out, size_t grid_size) {
-    size_t index = threadIdx.x;
-    // grab block sums from the previous kernel, use 0. as the neutral sum element
-    float block_sum = (index < grid_size) ? out[index] : 0.f;
-    float sum = blockReduce<warpReduceSum>(block_sum);
-    if(threadIdx.x == 0) {
-        out[0] = sum;  // out[0] ends up with the final norm squared
-    }
-}
-
 // ----------------------------------------------------------------------------
 // kernel launcher
 
-// Helper function determines the maximum number of block sums
-int get_max_num_block_sums(int* num_slices_all, int numel) {
-    // NOTE: this needs to be kept in sync with `global_norm_squared` below.
-    const int block_size = 512;
-    const int grid_size = deviceProp.maxThreadsPerMultiProcessor * deviceProp.multiProcessorCount / block_size;
-    assert(grid_size > 0);
-    int max_num_block_sums = 0;
-    for (int i = 0; i < numel; i++) {
-        int num_slices = num_slices_all[i];
-        const int gx = CEIL_DIV(grid_size, num_slices);
-        const int gy = num_slices;
-        max_num_block_sums = max(max_num_block_sums, gx * gy);
-    }
 
-    return max_num_block_sums;
-}
 
 template<typename T>
 void global_norm_squared(float* out, const T* values, size_t count, ptrdiff_t stride, int num_slices, int max_num_block_sums, bool reset, cudaStream_t stream) {
@@ -86,4 +61,36 @@ void global_norm_squared(float* out, const T* values, size_t count, ptrdiff_t st
     }
     global_norm_squared_kernel<<<dim3(gx, gy), block_size, 0, stream>>>(out, values, count, stride);
     cudaCheck(cudaGetLastError());
+}
+
+
+extern "C" {
+    // Helper function determines the maximum number of block sums
+    int get_max_num_block_sums(int* num_slices_all, int numel) {
+        // NOTE: this needs to be kept in sync with `global_norm_squared` below.
+        const int block_size = 512;
+        const int grid_size = deviceProp.maxThreadsPerMultiProcessor * deviceProp.multiProcessorCount / block_size;
+        assert(grid_size > 0);
+        int max_num_block_sums = 0;
+        for (int i = 0; i < numel; i++) {
+            int num_slices = num_slices_all[i];
+            const int gx = CEIL_DIV(grid_size, num_slices);
+            const int gy = num_slices;
+            max_num_block_sums = max(max_num_block_sums, gx * gy);
+        }
+
+        return max_num_block_sums;
+    }
+    
+    void global_norm_squared_float(float* out, const float* values, size_t count, ptrdiff_t stride, int num_slices, int max_num_block_sums, bool reset, cudaStream_t stream) {
+        global_norm_squared<float>(out, values, count, stride, num_slices, max_num_block_sums, reset, stream);
+    }
+
+    void global_norm_squared_fp16(float* out, const half* values, size_t count, ptrdiff_t stride, int num_slices, int max_num_block_sums, bool reset, cudaStream_t stream) {
+        global_norm_squared<half>(out, values, count, stride, num_slices, max_num_block_sums, reset, stream);
+    }
+
+    void global_norm_squared_bf16(float* out, const __nv_bfloat16* values, size_t count, ptrdiff_t stride, int num_slices, int max_num_block_sums, bool reset, cudaStream_t stream) {
+        global_norm_squared<__nv_bfloat16>(out, values, count, stride, num_slices, max_num_block_sums, reset, stream);
+    }
 }
