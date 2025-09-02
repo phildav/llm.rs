@@ -10,7 +10,7 @@ use llm_rs::sampler;
 use llm_rs::cuda_launchers::*;
 use llm_rs::outlier_detector::OutlierDetector;
 use cust::{prelude::*};
-use cust::memory::{DeviceCopy, DeviceMemory, GpuBuffer, LockedBuffer};
+use cust::memory::{DeviceCopy, GpuBuffer, LockedBuffer};
 
 // Simple MultiGpuConfig struct for checkpoint functionality
 #[derive(Debug, Clone)]
@@ -723,11 +723,6 @@ impl GPT2 {
         memory.index(offset..offset + layer_size)
     }
 
-    fn get_layer_params_raw<T: DeviceCopy>(memory: DeviceSlice<T>, layer: usize, layer_size: usize) -> u64 {
-        GPT2::get_layer_params(memory, layer, layer_size).as_raw_ptr()
-    }
-
-
 
     #[allow(non_snake_case)]
     pub fn forward(&mut self, inputs: &[i32], B: usize, T: usize, stream: &Stream) {
@@ -753,48 +748,47 @@ impl GPT2 {
 
         // forward pass
         let params = &self.params;
-        let acts = self.acts.as_ref().unwrap();
-        unsafe { encoder_forward(acts.encoded.as_raw_ptr(), self.inputs.as_ref().unwrap().as_raw_ptr(), params.wte.as_raw_ptr(), params.wpe.as_raw_ptr(), B as i32, T as i32, C as i32, stream.as_inner());}
+        let acts = self.acts.as_mut().unwrap();
+        k_encoder_forward(&mut acts.encoded, &self.inputs.as_ref().unwrap(), &params.wte, &params.wpe, B, T, C, stream);
         
         // first layernorm isn't fused
-        let ln1 = if self.recompute < 2 { acts.ln1 } else { acts.lnf };
-        unsafe { layernorm_forward(ln1.as_raw_ptr() , acts.ln1_mean.as_raw_ptr(), acts.ln1_rstd.as_raw_ptr(), acts.encoded.as_raw_ptr(), params.ln1w.as_raw_ptr(), params.ln1b.as_raw_ptr(), B as i32, T as i32, C as i32, stream.as_inner());}
+        let mut ln1 = if self.recompute < 2 { acts.ln1 } else { acts.lnf };
+        k_layernorm_forward(&mut ln1 , &mut acts.ln1_mean, &mut acts.ln1_rstd, &acts.encoded, &params.ln1w, &params.ln1b, B, T, C, stream);
 
-        let pre_gelu_default = DevicePointer::<FloatX>::null().as_raw();
+        let mut pre_gelu_default = DevicePointer::<FloatX>::null();
         let gelu_fusion_default = 0;
 
         for l in 0..L {
             // NvtxRange layer_range("Layer", l);
 
             let residual = if l == 0 { acts.encoded } else { GPT2::get_layer_params(acts.residual3, l-1, B * T * C) };
-            let residual = residual.as_raw_ptr();
 
             // get the pointers of the weights for this layer
-            let l_qkvw = GPT2::get_layer_params_raw(params.qkvw, l,  3*C * C);
-            let l_qkvb = GPT2::get_layer_params_raw(params.qkvb, l, 3*C);
-            let l_attprojw = GPT2::get_layer_params_raw(params.attprojw, l, C * C);
-            let l_attprojb = GPT2::get_layer_params_raw(params.attprojb, l, C);
-            let l_ln2w = GPT2::get_layer_params_raw(params.ln2w, l, C);
-            let l_ln2b = GPT2::get_layer_params_raw(params.ln2b, l, C);
+            let l_qkvw = GPT2::get_layer_params(params.qkvw, l,  3*C * C);
+            let l_qkvb = GPT2::get_layer_params(params.qkvb, l, 3*C);
+            let l_attprojw = GPT2::get_layer_params(params.attprojw, l, C * C);
+            let l_attprojb = GPT2::get_layer_params(params.attprojb, l, C);
+            let l_ln2w = GPT2::get_layer_params(params.ln2w, l, C);
+            let l_ln2b = GPT2::get_layer_params(params.ln2b, l, C);
             let l_fcw = GPT2::get_layer_params(params.fcw, l, 4*C * C);
             let l_fcb = GPT2::get_layer_params(params.fcb, l, 4*C);
-            let l_fcprojw = GPT2::get_layer_params_raw(params.fcprojw, l, C * 4*C);
-            let l_fcprojb = GPT2::get_layer_params_raw(params.fcprojb, l, C);
+            let l_fcprojw = GPT2::get_layer_params(params.fcprojw, l, C * 4*C);
+            let l_fcprojb = GPT2::get_layer_params(params.fcprojb, l, C);
 
             // get the pointers of the activations for this layer
-            let l_ln1 = if self.recompute < 2 { GPT2::get_layer_params_raw(acts.ln1, l, B * T * C) } else { acts.lnf.as_raw_ptr() };
-            let l_qkvr = GPT2::get_layer_params_raw(acts.qkvr, l, B * T * 3*C);
-            let l_atty = GPT2::get_layer_params(acts.atty, l, B * T * C);
-            let l_residual2 = GPT2::get_layer_params(acts.residual2, l, B * T * C);
-            let l_ln2 = if self.recompute < 2 { GPT2::get_layer_params(acts.ln2, l, B * T * C) } else { acts.lnf };
-            let l_ln2_mean = GPT2::get_layer_params_raw(acts.ln2_mean, l, B * T);
-            let l_ln2_rstd = GPT2::get_layer_params_raw(acts.ln2_rstd, l, B * T);
+            let l_ln1 = if self.recompute < 2 { GPT2::get_layer_params(acts.ln1, l, B * T * C) } else { acts.lnf };
+            let mut l_qkvr = GPT2::get_layer_params(acts.qkvr, l, B * T * 3*C);
+            let mut l_atty = GPT2::get_layer_params(acts.atty, l, B * T * C);
+            let mut l_residual2 = GPT2::get_layer_params(acts.residual2, l, B * T * C);
+            let mut l_ln2 = if self.recompute < 2 { GPT2::get_layer_params(acts.ln2, l, B * T * C) } else { acts.lnf };
+            let mut l_ln2_mean = GPT2::get_layer_params(acts.ln2_mean, l, B * T);
+            let mut l_ln2_rstd = GPT2::get_layer_params(acts.ln2_rstd, l, B * T);
             let l_fch = GPT2::get_layer_params(acts.fch, l, B * T * 4*C);
             // reuse the same activation buffer at each layer, as we'll re-compute the gelu during backward
             // very useful because we dramatically reduce VRAM usage, and may be able to fit larger batch size
-            let l_fch_gelu = if self.recompute < 1 { GPT2::get_layer_params(acts.fch_gelu, l, B * T * 4*C) } else { acts.fch_gelu };
-            let l_residual3 = GPT2::get_layer_params(acts.residual3, l, B * T * C);
-            let scratch = acts.output.as_raw_ptr();  // used for non-cudnn attention, fcproj, attproj, etc.
+            let mut l_fch_gelu = if self.recompute < 1 { GPT2::get_layer_params(acts.fch_gelu, l, B * T * 4*C) } else { acts.fch_gelu };
+            let mut l_residual3 = GPT2::get_layer_params(acts.residual3, l, B * T * C);
+            let mut scratch = acts.output;  // used for non-cudnn attention, fcproj, attproj, etc.
 
             let mut l_att = GPT2::get_layer_params(acts.att, l, B * NH * T * T);
 
@@ -802,37 +796,36 @@ impl GPT2 {
             if T != self.seq_len {
                 l_att.set_zero().unwrap();
             }
-            let l_att = l_att.as_raw_ptr();
 
-            unsafe {
-                // these are only needed as scratchpads for the forward pass, but
-                // need not be stored for backward
-                matmul_forward_cublaslt(scratch, l_ln1, l_qkvw, l_qkvb, B as i32, T as i32, C as i32, 3*C as i32, stream.as_inner(), pre_gelu_default, gelu_fusion_default);
-                attention_forward(l_atty.as_raw_ptr(), l_qkvr, l_att, scratch, B as i32, T as i32, C as i32, NH as i32, stream.as_inner());
-                
-                matmul_forward_cublaslt(scratch, l_atty.as_raw_ptr(), l_attprojw, l_attprojb, B as i32, T as i32, C as i32, C as i32, stream.as_inner(), pre_gelu_default, gelu_fusion_default);
-                fused_residual_forward5(l_residual2.as_raw_ptr(), l_ln2.as_raw_ptr(), l_ln2_mean, l_ln2_rstd, residual, scratch, l_ln2w, l_ln2b, (B*T) as i32, C as i32, stream.as_inner());
-                matmul_forward_cublaslt(l_fch_gelu.as_raw_ptr(), l_ln2.as_raw_ptr(), l_fcw.as_raw_ptr(), l_fcb.as_raw_ptr(), B as i32, T as i32, C as i32, 4*C as i32, stream.as_inner(), l_fch.as_raw_ptr(), self.gelu_fusion);
-                matmul_forward_cublaslt(scratch, l_fch_gelu.as_raw_ptr(), l_fcprojw, l_fcprojb, B as i32, T as i32, 4*C as i32, C as i32, stream.as_inner(), pre_gelu_default, gelu_fusion_default);
-            }
+            // these are only needed as scratchpads for the forward pass, but
+            // need not be stored for backward
+            k_matmul_forward_cublaslt(&mut scratch, &l_ln1, &l_qkvw, &l_qkvb.as_device_ptr(), B, T, C, 3*C, stream, &mut pre_gelu_default, gelu_fusion_default);
+            k_attention_forward(&mut l_atty, &mut l_qkvr, &mut l_att, &scratch, B, T, C, NH, stream);
+            
+            k_matmul_forward_cublaslt(&mut scratch, &l_atty, &l_attprojw, &l_attprojb.as_device_ptr(), B, T, C, C, stream, &mut pre_gelu_default, gelu_fusion_default);
+            k_fused_residual_forward5(&mut l_residual2, &mut l_ln2, &mut l_ln2_mean, &mut l_ln2_rstd, &residual, &scratch, &l_ln2w, &l_ln2b, B*T, C, stream);
+            k_matmul_forward_cublaslt(&mut l_fch_gelu, &l_ln2, &l_fcw, &l_fcb.as_device_ptr(), B, T, C, 4*C, stream, &mut l_fch.as_device_ptr(), self.gelu_fusion);
+            k_matmul_forward_cublaslt(&mut scratch, &l_fch_gelu, &l_fcprojw, &l_fcprojb.as_device_ptr(), B, T, 4*C, C, stream, &mut pre_gelu_default, gelu_fusion_default);
+            
 
             // OK, fusion across blocks.
             if l+1 != L {
-                let l_ln1 = if self.recompute < 2 { acts.ln1.index((l+1) * B * T * C .. (l+2) * B * T * C) } else { acts.lnf };
-                let l_ln1 = l_ln1.as_raw_ptr();
-                let l_ln1_mean = acts.ln1_mean.index((l+1) * B * T .. (l+2) * B * T).as_raw_ptr();
-                let l_ln1_rstd = acts.ln1_rstd.index((l+1) * B * T .. (l+2) * B * T).as_raw_ptr();
-                let l_ln1w = params.ln1w.index((l+1) * C .. (l+2) * C).as_raw_ptr();
-                let l_ln1b = params.ln1b.index((l+1) * C .. (l+2) * C).as_raw_ptr();
-                unsafe {fused_residual_forward5(l_residual3.as_raw_ptr(), l_ln1, l_ln1_mean, l_ln1_rstd, l_residual2.as_raw_ptr(), scratch, l_ln1w, l_ln1b, (B*T) as i32, C as i32, stream.as_inner());}
+                let mut l_ln1 = if self.recompute < 2 { acts.ln1.index((l+1) * B * T * C .. (l+2) * B * T * C) } else { acts.lnf };
+                let mut l_ln1_mean = acts.ln1_mean.index((l+1) * B * T .. (l+2) * B * T);
+                let mut l_ln1_rstd = acts.ln1_rstd.index((l+1) * B * T .. (l+2) * B * T);
+                let l_ln1w = params.ln1w.index((l+1) * C .. (l+2) * C);
+                let l_ln1b = params.ln1b.index((l+1) * C .. (l+2) * C);
+                k_fused_residual_forward5(&mut l_residual3, &mut l_ln1, &mut l_ln1_mean, &mut l_ln1_rstd, 
+                    &l_residual2, &scratch, &l_ln1w, &l_ln1b, 
+                    B*T, C, stream);
             } else {
-                unsafe {fused_residual_forward5(l_residual3.as_raw_ptr(), acts.lnf.as_raw_ptr(), acts.lnf_mean.as_raw_ptr(), acts.lnf_rstd.as_raw_ptr(), l_residual2.as_raw_ptr(), scratch,
-                                        params.lnfw.as_raw_ptr(), params.lnfb.as_raw_ptr(),
-                                        (B * T) as i32, C as i32, stream.as_inner());}
+                k_fused_residual_forward5(&mut l_residual3, &mut acts.lnf, &mut acts.lnf_mean, &mut acts.lnf_rstd, 
+                    &l_residual2, &scratch, &params.lnfw, &params.lnfb,
+                    B*T, C, stream);
             }
         }
 
-        unsafe { matmul_forward_cublaslt(acts.output.as_raw_ptr(), acts.lnf.as_raw_ptr(), params.wte.as_raw_ptr(), DevicePointer::<FloatX>::null().as_raw(), B as i32, T as i32, C as i32, Vp as i32, stream.as_inner(), pre_gelu_default, gelu_fusion_default);}
+        k_matmul_forward_cublaslt(&mut acts.output, & acts.lnf, &params.wte, &DevicePointer::<FloatX>::null(), B, T, C, Vp, stream, &mut pre_gelu_default, gelu_fusion_default);
         stream.synchronize().unwrap();
     }
 
@@ -905,6 +898,7 @@ impl GPT2 {
         let dloss = 1.0f32 / (B * T * grad_accum_steps) as f32; // results in the uniform average loss over all elements
         d_targets.copy_from(targets).unwrap();
         GPT2::check_tokens(targets, V);
+        //debug::debug_print_device_tensor(acts.output, "[backward] logits=acts.output", stream);
         k_fused_classifier(&mut acts.output, &mut acts.losses, dloss, &d_targets, B, T, V, Vp, true, stream);
         
         // backward pass: go in the reverse order of the forward pass, and call backward() functions
@@ -914,119 +908,123 @@ impl GPT2 {
         dresidual.set_zero().unwrap();
 
         // borrow acts.output and call it scratchF
-        // TODO borrow instead to add some safety
-        let scratchF: DevicePointer<f32> = DevicePointer::from_raw(acts.output.as_device_ptr().as_raw());
-        let scratchX = acts.output.as_raw_ptr();
-        let null_floatx = DevicePointer::<FloatX>::null().as_raw();
-        let pre_gelu = null_floatx;
-        let gelu_fusion = 1;
+        let scratchF = &mut borrow_as_f32_mut(&mut acts.output);
+        let mut device_floatx_none: Option<DeviceSlice<FloatX>> = None;
+        let device_f32_none: Option<DeviceSlice<f32>> = None;
+        let mut default_pre_gelu = device_floatx_none;
+        let default_gelu_fusion = 1;
         
         // we kick off the chain rule by filling in dlosses with 1.0f/(B*T)
         // this was done in the fused classifier kernel as last step of forward pass
         // technically that is a small, inline backward() pass of calculating
         // total, final loss as the mean over all losses over all (B,T) positions in the batch
         // next: backward the classifier matmul
-        unsafe { matmul_backward(acts.scratch_bt4c.as_raw_ptr(), grads.wte.as_raw_ptr(), null_floatx, acts.output.as_raw_ptr(), acts.lnf.as_raw_ptr(), params.wte.as_raw_ptr(), null_floatx, B as i32, T as i32, C as i32, Vp as i32, stream.as_inner(), pre_gelu, gelu_fusion);}
+        k_matmul_backward(&mut acts.scratch_bt4c, &mut grads.wte, &mut device_floatx_none, &acts.output, &acts.lnf, &params.wte, device_f32_none, B, T, C, Vp, stream, &mut default_pre_gelu, default_gelu_fusion);
         // backward the final layernorm
-        let mut residual =  GPT2::get_layer_params_raw(acts.residual3, L-1,  B * T * C);
-        unsafe { layernorm_backward(dresidual.as_raw_ptr(), grads.lnfw.as_raw_ptr(), grads.lnfb.as_raw_ptr(), scratchF.as_raw(), acts.scratch_bt4c.as_raw_ptr(), residual, params.lnfw.as_raw_ptr(), acts.lnf_mean.as_raw_ptr(), acts.lnf_rstd.as_raw_ptr(), B as i32, T as i32, C as i32, stream.as_inner());}
+        let mut residual =  GPT2::get_layer_params(acts.residual3, L-1,  B * T * C);
+        k_layernorm_backward(&mut dresidual, &mut grads.lnfw, &mut grads.lnfb, scratchF, &acts.scratch_bt4c, &residual, &params.lnfw, &acts.lnf_mean, &acts.lnf_rstd, B, T, C, stream);
 
         // from this point on, we no longer need the values stored in the last residual, so we can reuse that memory as generic
         // scratch for backward computations
-        let dl_btc = residual;
+        let mut dl_btc = residual;
 
         // now backward all the layers
         for l in (0..L).rev() {
             //NvtxRange layer_range("Layer", l);
 
-            residual = if l == 0 { acts.encoded.as_raw_ptr() } else { GPT2::get_layer_params_raw(acts.residual3, l-1, B*T*C) };
+            residual = if l == 0 { acts.encoded } else { GPT2::get_layer_params(acts.residual3, l-1, B*T*C) };
+            let scratchF = &mut borrow_as_f32_mut(&mut acts.output);
 
             // get the pointers of the weights for this layer
-            let l_ln1w = GPT2::get_layer_params_raw(params.ln1w, l, C);
-            let l_ln1b = GPT2::get_layer_params_raw(params.ln1b, l, C);
-            let l_qkvw = GPT2::get_layer_params_raw(params.qkvw, l, 3*C * C);
-            let l_attprojw = GPT2::get_layer_params_raw(params.attprojw, l, C * C);
-            let l_ln2w = GPT2::get_layer_params_raw(params.ln2w, l, C);
-            let l_ln2b = GPT2::get_layer_params_raw(params.ln2b, l, C);
-            let l_fcw = GPT2::get_layer_params_raw(params.fcw, l, 4*C * C);
-            let l_fcprojw = GPT2::get_layer_params_raw(params.fcprojw, l, C * 4*C);
+            let l_ln1w = GPT2::get_layer_params(params.ln1w, l, C);
+            let l_ln1b = GPT2::get_layer_params(params.ln1b, l, C);
+            let l_qkvw = GPT2::get_layer_params(params.qkvw, l, 3*C * C);
+            let l_attprojw = GPT2::get_layer_params(params.attprojw, l, C * C);
+            let l_ln2w = GPT2::get_layer_params(params.ln2w, l, C);
+            let l_ln2b = GPT2::get_layer_params(params.ln2b, l, C);
+            let l_fcw = GPT2::get_layer_params(params.fcw, l, 4*C * C);
+            let l_fcprojw = GPT2::get_layer_params(params.fcprojw, l, C * 4*C);
             // get the pointers of the gradients of the weights for this layer
-            let dl_ln1w = GPT2::get_layer_params_raw(grads.ln1w, l, C);
-            let dl_ln1b = GPT2::get_layer_params_raw(grads.ln1b, l, C);
-            let dl_qkvw = GPT2::get_layer_params_raw(grads.qkvw, l, 3*C * C);
-            let dl_qkvb = GPT2::get_layer_params_raw(grads.qkvb, l, 3*C);
-            let dl_attprojw = GPT2::get_layer_params_raw(grads.attprojw, l, C * C);
-            let dl_attprojb = GPT2::get_layer_params_raw(grads.attprojb, l, C);
-            let dl_ln2w = GPT2::get_layer_params_raw(grads.ln2w, l, C);
-            let dl_ln2b = GPT2::get_layer_params_raw(grads.ln2b, l, C);
-            let dl_fcw = GPT2::get_layer_params_raw(grads.fcw, l, 4*C * C);
-            let dl_fcb = GPT2::get_layer_params_raw(grads.fcb, l, 4*C);
-            let dl_fcprojw = GPT2::get_layer_params_raw(grads.fcprojw, l, C * 4*C);
-            let dl_fcprojb = GPT2::get_layer_params_raw(grads.fcprojb, l, C);
+            let mut dl_ln1w = GPT2::get_layer_params(grads.ln1w, l, C);
+            let mut dl_ln1b = GPT2::get_layer_params(grads.ln1b, l, C);
+            let mut dl_qkvw = GPT2::get_layer_params(grads.qkvw, l, 3*C * C);
+            let dl_qkvb = GPT2::get_layer_params(grads.qkvb, l, 3*C);
+            let mut dl_attprojw = GPT2::get_layer_params(grads.attprojw, l, C * C);
+            let dl_attprojb = GPT2::get_layer_params(grads.attprojb, l, C);
+            let mut dl_ln2w = GPT2::get_layer_params(grads.ln2w, l, C);
+            let mut dl_ln2b = GPT2::get_layer_params(grads.ln2b, l, C);
+            let mut dl_fcw = GPT2::get_layer_params(grads.fcw, l, 4*C * C);
+            let dl_fcb = GPT2::get_layer_params(grads.fcb, l, 4*C);
+            let mut dl_fcprojw = GPT2::get_layer_params(grads.fcprojw, l, C * 4*C);
+            let dl_fcprojb = GPT2::get_layer_params(grads.fcprojb, l, C);
             // get the pointers of the activations for this layer
-            let l_ln1 = if self.recompute < 2 { GPT2::get_layer_params_raw(acts.ln1, l, B * T * C) } else { acts.lnf.as_raw_ptr() };
-            let l_ln1_mean = GPT2::get_layer_params_raw(acts.ln1_mean, l, B * T);
-            let l_ln1_rstd = GPT2::get_layer_params_raw(acts.ln1_rstd, l, B * T);
-            let l_qkvr = GPT2::get_layer_params_raw(acts.qkvr, l, B * T * 3*C);
-            let l_atty = GPT2::get_layer_params_raw(acts.atty, l, B * T * C);
-            let l_residual2 = GPT2::get_layer_params_raw(acts.residual2, l, B * T * C);
-            let l_ln2 = if self.recompute < 2 { GPT2::get_layer_params_raw(acts.ln2, l, B * T * C) } else { acts.lnf.as_raw_ptr() };
-            let l_ln2_mean = GPT2::get_layer_params_raw(acts.ln2_mean, l, B * T);
-            let l_ln2_rstd = GPT2::get_layer_params_raw(acts.ln2_rstd, l, B * T);
-            let l_fch_pre_gelu = GPT2::get_layer_params_raw(acts.fch, l, B * T * 4*C);
-            let l_fch_gelu = if self.recompute < 1 { GPT2::get_layer_params_raw(acts.fch_gelu, l, B * T * 4*C) } else { acts.fch_gelu.as_raw_ptr() };
+            let mut l_ln1 = if self.recompute < 2 { GPT2::get_layer_params(acts.ln1, l, B * T * C) } else { acts.lnf };
+            let mut l_ln1_mean = GPT2::get_layer_params(acts.ln1_mean, l, B * T);
+            let mut l_ln1_rstd = GPT2::get_layer_params(acts.ln1_rstd, l, B * T);
+            let l_qkvr = GPT2::get_layer_params(acts.qkvr, l, B * T * 3*C);
+            let l_atty = GPT2::get_layer_params(acts.atty, l, B * T * C);
+            let l_residual2 = GPT2::get_layer_params(acts.residual2, l, B * T * C);
+            let mut l_ln2 = if self.recompute < 2 { GPT2::get_layer_params(acts.ln2, l, B * T * C) } else { acts.lnf };
+            let mut l_ln2_mean = GPT2::get_layer_params(acts.ln2_mean, l, B * T);
+            let mut l_ln2_rstd = GPT2::get_layer_params(acts.ln2_rstd, l, B * T);
+            let l_fch_pre_gelu = GPT2::get_layer_params(acts.fch, l, B * T * 4*C);
+            let mut l_fch_gelu = if self.recompute < 1 { GPT2::get_layer_params(acts.fch_gelu, l, B * T * 4*C) } else { acts.fch_gelu };
             // get the pointers of the gradients of the activations for this layer
             // notice that there is no l *, because we just have a single copy, and keep
             // re-using this memory in every Transformer block as we calculate backward pass
-            let dl_bt4c = acts.scratch_bt4c.as_raw_ptr();
+            let mut dl_bt4c = acts.scratch_bt4c;
 
-            let default_pre_gelu = null_floatx;
-            let default_gelu_fusion = 0;
-
-            unsafe { 
-                if self.recompute >= 1 {
-                    // recompute >= 1 means we recompute gelu. in this case,
-                    // l_fch_gelu is just a buffer, so re-compute the gelu from l_fch here
-                    gelu_forward(l_fch_gelu, l_fch_pre_gelu, (B*T*4*C) as i32, stream.as_inner());
-                }
-                matmul_backward(dl_bt4c, dl_fcprojw, dl_fcprojb, dresidual.as_raw_ptr(), l_fch_gelu, l_fcprojw, scratchF.as_raw(), B as i32, T as i32 , 4*C as i32, C as i32, stream.as_inner(), l_fch_pre_gelu, self.gelu_fusion);
-                if self.recompute >= 2 {
-                    // same as gelu above, l_ln1 and l_ln2 are just buffers if recompute >= 2, recompute them here on demand
-                    layernorm_forward(l_ln2, l_ln2_mean, l_ln2_rstd, l_residual2, l_ln2w, l_ln2b, B as i32, T as i32, C as i32, stream.as_inner());
-                }
-                matmul_backward(dl_btc, dl_fcw, dl_fcb, dl_bt4c, l_ln2, l_fcw, scratchF.as_raw(), B as i32, T as i32, C as i32, (4 * C)  as i32, stream.as_inner(), default_pre_gelu, default_gelu_fusion);
-                // layernorm backward does += to the dresidual, so it correctly accumulates grad from the MLP block above
-                layernorm_backward(dresidual.as_raw_ptr(), dl_ln2w, dl_ln2b, scratchF.as_raw(), dl_btc, l_residual2, l_ln2w, l_ln2_mean, l_ln2_rstd, B as i32, T as i32, C as i32, stream.as_inner());
-                matmul_backward(dl_btc, dl_attprojw, dl_attprojb, dresidual.as_raw_ptr(), l_atty, l_attprojw, scratchF.as_raw(), B as i32, T as i32, C as i32, C as i32, stream.as_inner(), default_pre_gelu, default_gelu_fusion);
-                let l_att = GPT2::get_layer_params(acts.att, l,  B * NH * T * T);
-                // we need B x T x (4)C buffers. l_atty and l_fch aren't needed anymore at this point, so reuse their memory
-                let buffer_a = l_atty;
-                let buffer_b = l_fch_pre_gelu;
-                attention_backward(dl_bt4c, buffer_b, scratchX, buffer_a, dl_btc, l_qkvr, l_att.as_raw_ptr(), B as i32, T as i32, C as i32, NH as i32, stream.as_inner());
-
-                if self.recompute >= 2 {
-                    layernorm_forward(l_ln1, l_ln1_mean, l_ln1_rstd, residual, l_ln1w, l_ln1b, B as i32, T as i32, C as i32, stream.as_inner());
-                }
-                // QKV parameter gradients
-                matmul_backward(dl_btc, dl_qkvw, dl_qkvb, dl_bt4c, l_ln1, l_qkvw, scratchF.as_raw(), B as i32, T as i32, C as i32, (3 * C)  as i32, stream.as_inner(), default_pre_gelu, default_gelu_fusion);
-                // layernorm backward does += to dresidual, so it correctly accumulates gradient for the Attention block above
-                layernorm_backward(dresidual.as_raw_ptr(), dl_ln1w, dl_ln1b, scratchF.as_raw(), dl_btc, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, B as i32, T as i32, C as i32, stream.as_inner());
-
-                // Accumulate gradients from this layer in a background stream.
-                // TODO
-                //multi_gpu_async_reduce_gradient(pointers, nelem, &multi_gpu_config, main_stream);
-                
+            if self.recompute >= 1 {
+                // recompute >= 1 means we recompute gelu. in this case,
+                // l_fch_gelu is just a buffer, so re-compute the gelu from l_fch here
+                k_gelu_forward(&mut l_fch_gelu, &l_fch_pre_gelu, B*T*4*C, stream);
             }
-        }
-        use libc::{c_int, c_void};
+            k_matmul_backward(&mut dl_bt4c, &mut dl_fcprojw, &mut Some(dl_fcprojb), &dresidual, &l_fch_gelu, &l_fcprojw, Some(*scratchF), B, T , 4*C, C, stream, &mut Some(l_fch_pre_gelu), self.gelu_fusion);
+            if self.recompute >= 2 {
+                // same as gelu above, l_ln1 and l_ln2 are just buffers if recompute >= 2, recompute them here on demand
+                k_layernorm_forward(&mut l_ln2, &mut l_ln2_mean, &mut l_ln2_rstd, &l_residual2, &l_ln2w, &l_ln2b, B, T, C, stream);
+            }
+            k_matmul_backward(&mut dl_btc, &mut dl_fcw, &mut Some(dl_fcb), &dl_bt4c, &l_ln2, &l_fcw, Some(*scratchF), B, T, C, 4 * C, stream, &mut default_pre_gelu, default_gelu_fusion);
+            // layernorm backward does += to the dresidual, so it correctly accumulates grad from the MLP block above
+            k_layernorm_backward(&mut dresidual, &mut dl_ln2w, &mut dl_ln2b, scratchF, &dl_btc, &l_residual2, &l_ln2w, &l_ln2_mean, &l_ln2_rstd, B, T, C, stream);
+            k_matmul_backward(&mut dl_btc, &mut dl_attprojw, &mut Some(dl_attprojb), &dresidual, &l_atty, &l_attprojw, Some(*scratchF), B, T, C, C, stream, &mut default_pre_gelu, default_gelu_fusion);
+            let l_att = GPT2::get_layer_params(acts.att, l,  B * NH * T * T);
+            // we need B x T x (4)C buffers. l_atty and l_fch aren't needed anymore at this point, so reuse their memory
+            
+            let _ = scratchF; // release scratchF so we can borrow acts.output as scratchX
+            let mut scratchX = &mut acts.output;
+            let mut buffer_a = l_atty;
+            let mut buffer_b = l_fch_pre_gelu;
+            k_attention_backward(&mut dl_bt4c, &mut buffer_b, &mut scratchX, &mut buffer_a, &dl_btc, &l_qkvr, &l_att, B, T, C, NH, stream);
 
-        unsafe {encoder_backward(grads.wte.as_raw_ptr() as *mut c_void, grads.wpe.as_raw_ptr() as *mut c_void, scratchX as *mut c_void, self.workload_indices.as_ref().unwrap().as_ptr() as *mut c_int, self.bucket_info.as_ref().unwrap().as_ptr() as *mut Int4,
-            dresidual.as_raw_ptr() as *const c_void, self.inputs.as_ref().unwrap().as_raw_ptr() as *const c_void, inputs.as_ptr() as *const c_int, B as i32, T as i32, C as i32, sampler::random_u32(&mut self.rng_state), stream.as_inner() as *mut c_void);}
+            if self.recompute >= 2 {
+                k_layernorm_forward(&mut l_ln1, &mut l_ln1_mean, &mut l_ln1_rstd, &residual, &l_ln1w, &l_ln1b, B, T, C, stream);
+            }
+
+            let _ = scratchX; // now release scratchX so we can borrow acts.output as scratchF
+            let scratchF = &mut borrow_as_f32_mut(&mut acts.output);
+
+            // QKV parameter gradients
+            k_matmul_backward(&mut dl_btc, &mut dl_qkvw, &mut Some(dl_qkvb), &dl_bt4c, &l_ln1, &l_qkvw, Some(*scratchF), B, T, C, 3 * C, stream, &mut default_pre_gelu, default_gelu_fusion);
+            // layernorm backward does += to dresidual, so it correctly accumulates gradient for the Attention block above
+            k_layernorm_backward(&mut dresidual, &mut dl_ln1w, &mut dl_ln1b, scratchF, &mut dl_btc, &residual, &l_ln1w, &l_ln1_mean, &l_ln1_rstd, B, T, C, stream);
+
+            // Accumulate gradients from this layer in a background stream.
+            // TODO
+            //multi_gpu_async_reduce_gradient(pointers, nelem, &multi_gpu_config, main_stream);
+            
+        }
+
+        let _ = scratchF; // discard scratchF
+        let mut scratchX = &mut acts.output;
+
+        k_encoder_backward(&mut grads.wte, &mut grads.wpe, &mut scratchX, &mut self.workload_indices.as_mut().unwrap(), &mut self.bucket_info.as_mut().unwrap(),
+            &dresidual, self.inputs.as_ref().unwrap(), inputs, B, T, C, sampler::random_u32(&mut self.rng_state), stream);
 
         // Aggregate all gradients that are not part of the transformer blocks
         if last_step {
             // reduce all the losses within the current GPU (across all microsteps)
-            unsafe {global_sum_deterministic_float(self.accumulated_mean_loss.as_ref().unwrap().as_raw_ptr(), acts.losses.as_raw_ptr(), (B*T) as i32, stream.as_inner());}
+            k_global_sum_deterministic_float(&mut self.accumulated_mean_loss.as_mut().unwrap(), &acts.losses, B*T, stream);
             
             self.accumulated_mean_loss.as_mut().unwrap().copy_dtoh().unwrap();
             self.mean_loss = **self.accumulated_mean_loss.as_ref().unwrap();
@@ -1046,27 +1044,25 @@ impl GPT2 {
         
         let grads_memory = self.grads.as_ref().unwrap().memory.as_device_ptr();
         
-        let mut grad_norm_squared_cpu = [0.0f32; 1];
-
         let num_slices: [i32; 2] = [1, self.config.num_layers as i32];
         let max_num_block_sums = unsafe {get_max_num_block_sums(num_slices.as_ptr(), 2)};
 
         // FIXME keep that buffer allocated
         let grad_norm_squared = DeviceBuffer::<f32>::zeroed(max_num_block_sums as usize).unwrap();
+        let mut grad_norm_squared_result = DeviceVariable::<f32>::new(0.0).unwrap();
 
         if multi_gpu_config.zero_stage == 1 {
             panic!("multi gpu is not supported");
         } else {
             // in regular DDP, backward has averaged the gradients across all GPUs
             // so each GPU can compute the squared norm over the whole grad vector, with no added comms needed
-            unsafe {
-                global_norm_squared(grad_norm_squared.as_device_ptr(), grads_memory, self.num_parameters, 0, 1, max_num_block_sums, true, stream.as_inner());
-                global_sum_deterministic_float(grad_norm_squared.as_raw_ptr(), grad_norm_squared.as_raw_ptr(), max_num_block_sums, stream.as_inner());
-            }
+            k_global_norm_squared(grad_norm_squared.as_device_ptr(), grads_memory, self.num_parameters, 0, 1, max_num_block_sums, true, stream);
+            k_global_sum_deterministic_float(&mut grad_norm_squared_result, &grad_norm_squared, max_num_block_sums as usize, stream);
         }
 
-        grad_norm_squared.index(0).copy_to(&mut grad_norm_squared_cpu).unwrap();
-        grad_norm_squared_cpu[0].sqrt()
+        grad_norm_squared_result.copy_dtoh().unwrap();
+        let grad_norm_squared_cpu = *grad_norm_squared_result;
+        grad_norm_squared_cpu.sqrt()
     }
 
     pub fn update(&mut self, learning_rate: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32, grad_scale: f32, t: i32, init_from_master_only: bool, stream: &Stream) {
@@ -1104,13 +1100,13 @@ impl GPT2 {
             // - the token embeddings are weight shared and participate in the final projection to logits
             // - the position embeddings actively participate at every forward/backward pass
             let wd = if tensor_id == 0 || tensor_id == 1 || tensor_id == 4 || tensor_id == 6 || tensor_id == 10 || tensor_id == 12 { weight_decay } else { 0.0f32 };
-            let param_ptr = unsafe { self.params.memory.as_device_ptr().offset(local_offset_full as isize)};
+            let mut param_ptr = unsafe { self.params.memory.as_device_ptr().offset(local_offset_full as isize)};
             let grad_ptr = unsafe {self.grads.as_ref().unwrap().memory.as_device_ptr().offset(local_offset_full as isize)};
 
             let opt_state_offset = local_offset_full;
             let m_ptr = unsafe {self.m_memory.as_ref().unwrap().as_device_ptr().offset(opt_state_offset as isize)};
             let v_ptr = unsafe {self.v_memory.as_ref().unwrap().as_device_ptr().offset(opt_state_offset as isize)};
-            let master_ptr = if let Some(master_weights) = &self.master_weights {
+            let mut master_ptr = if let Some(master_weights) = &self.master_weights {
                 unsafe {master_weights.as_device_ptr().offset(opt_state_offset as isize)}
             } else {
                 cust::memory::DevicePointer::null()
@@ -1118,23 +1114,19 @@ impl GPT2 {
 
             if init_state && self.master_weights.is_some() {
                 let grid_size = shard.size.div_ceil(512);
-                unsafe {
-                    copy_and_cast(master_ptr.as_raw(), param_ptr.as_raw(), shard.size, shard.size, tensor.size, grid_size, num_layers, stream.as_inner());
-                }
+                k_copy_and_cast(&mut master_ptr, &param_ptr, shard.size, shard.size, tensor.size, grid_size, num_layers, stream);
             }
             
             if init_from_master_only {
                 // when resuming training from a checkpoint with master weights (allows changing precision)
-                unsafe { init_from_master(param_ptr.as_raw(), master_ptr.as_raw(), shard.size, tensor.size, shard.size, num_layers, seed, stream.as_inner());}
+                k_init_from_master(&mut param_ptr, &master_ptr, shard.size, tensor.size, shard.size, num_layers, seed, stream);
             } else {
-                // ok finally call the kernel to update the weights with AdamW
-                unsafe {
-                    adamw_update(param_ptr.as_raw(), master_ptr.as_raw(), grad_ptr.as_raw(),
-                        m_ptr.as_raw(), v_ptr.as_raw(),
-                        shard.size, tensor.size, tensor.size, shard.size, num_layers,
-                        learning_rate,
-                        beta1, beta2, t, eps, wd, grad_scale, seed, stream.as_inner());
-                }
+            // ok finally call the kernel to update the weights with AdamW
+                k_adamw_update(&mut param_ptr, &master_ptr, &grad_ptr,
+                    &m_ptr, &v_ptr,
+                    shard.size, tensor.size, tensor.size, shard.size, num_layers,
+                    learning_rate,
+                    beta1, beta2, t, eps, wd, grad_scale, seed, stream);
             }            
         }
 
@@ -1710,7 +1702,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // NvtxRange validation_range("validation");
             let mut val_loss = 0.0f32;
             val_loader.reset();
-            for i in 0..val_num_batches {
+            for _ in 0..val_num_batches {
                 val_loader.next_batch();
                 val_loss += model.validate(val_loader.inputs(), val_loader.targets(), B, T, &stream);
             }

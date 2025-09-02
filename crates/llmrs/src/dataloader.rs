@@ -193,8 +193,6 @@ impl Dataloader {
         // -1 uint16_t due to us taking B*T+1 tokens but moving by B*T tokens
         self.shard_num_samples = (ntok - 1) * std::mem::size_of::<u16>() / self.total_batch_size_bytes;
 
-        println!("Loaded shard #{}: Shard num samples: {}", shard_index, self.shard_num_samples);
-
         self.tokens_file = Some(tokens_file_reader);
 
         ntok

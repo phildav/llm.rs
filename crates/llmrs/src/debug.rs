@@ -22,7 +22,7 @@ pub fn sig_bf16(words: &[u16]) -> u64 {
 }
 
 
-fn debug_print_tensor(cpu_tensor: &[FloatX], name: &str) {        
+pub fn debug_print_tensor(cpu_tensor: &[FloatX], name: &str) {        
     // Compute checksum before f32 conversion for bf16
     let bf16_checksum = if std::any::type_name::<FloatX>() == "bf16" {
         let bf16_words: &[u16] = bytemuck::cast_slice(cpu_tensor);
@@ -35,7 +35,7 @@ fn debug_print_tensor(cpu_tensor: &[FloatX], name: &str) {
     debug_print_tensor_f32(&f32_buffer, name, bf16_checksum);
 }
 
-fn debug_print_tensor_f32(cpu_tensor: &[f32], name: &str, bf16_checksum: u64) {
+pub fn debug_print_tensor_f32(cpu_tensor: &[f32], name: &str, bf16_checksum: u64) {
     let first_5 = &cpu_tensor[..min(5, cpu_tensor.len())];
     let last_5 = if cpu_tensor.len() > 5 {
         &cpu_tensor[cpu_tensor.len() - 5..]
@@ -51,7 +51,7 @@ fn debug_print_tensor_f32(cpu_tensor: &[f32], name: &str, bf16_checksum: u64) {
     println!("DEBUG TENSOR {} (sum: {}){} (first 5: {:?}, last 5: {:?})", name, cpu_tensor.iter().sum::<f32>(), checksum_str, first_5, last_5);
 }
 
-fn debug_print_device_tensor(tensor: DeviceSlice<FloatX>, name: &str, stream: &Stream) {
+pub fn debug_print_device_tensor(tensor: DeviceSlice<FloatX>, name: &str, stream: &Stream) {
     stream.synchronize().unwrap();
     let mut cpu_buffer = vec![unsafe { std::mem::zeroed::<FloatX>() }; tensor.len()];
     tensor.copy_to(&mut cpu_buffer).unwrap();
