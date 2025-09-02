@@ -20,10 +20,10 @@ pub fn sample_softmax(logits: &[f32], coin: f32) -> usize {
     // coin is a random number in [0, 1), usually from random_f32()
     let norm: f64 = logits.iter().map(|&x| f64::from(x.exp())).sum();
     // instead of dividing all exp(logits), we can just multiply coin.
-    let coin = coin as f64 * norm;
-    let mut cdf = 0.0f64;
+    let coin = coin * norm as f32;
+    let mut cdf = 0.0f32;
     for (i, &logit) in logits.iter().enumerate() {
-        cdf += logit.exp() as f64;
+        cdf += logit.exp();
         if coin < cdf {
             return i;
         }
