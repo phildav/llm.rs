@@ -5,15 +5,30 @@ edition = "2024"
 
 [features]
 default = []
-cuda = []     # compile cuda/*.cu
+cuda = ["cust"]     # compile cuda/*.cu
 bf16 = []
 fp16 = []
 
 [dependencies]
-cust = "0.3.2"
+cust = { version = "0.3.2", optional = true }
 half = "2.6.0"
 rand = "0.9.2"
 bytemuck = "1.14"
 
 [build-dependencies]
 cc = "1.2"
+
+[[bin]]
+name = "add"
+path = "src/bin/add.rs"
+required-features = ["cuda"]
+
+[[bin]]
+name = "encoder_forward"
+path = "src/bin/encoder_forward.rs"
+required-features = ["cuda"]
+
+[[bin]]
+name = "matmul_forward"
+path = "src/bin/matmul_forward.rs"
+required-features = ["cuda"]

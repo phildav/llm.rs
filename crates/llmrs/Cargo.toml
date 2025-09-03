@@ -6,7 +6,7 @@ authors = ["phildav"]
 
 [features]
 default = []
-cuda = []     # compile cuda/*.cu
+cuda = ["cust", "nvml-wrapper"]     # compile cuda/*.cu
 bf16 = []
 fp16 = []
 
@@ -15,20 +15,23 @@ glob = "0.3.2"
 rand_mt = "5.0.0"
 rand = "0.8.5"
 rayon = "1.10.0"
-cust = "0.3.2"
-nvml-wrapper = "0.11.0"
+cust = { version = "0.3.2", optional = true }
+nvml-wrapper = { version = "0.11.0", optional = true }
 
 half = "2.6.0"
 bytemuck = "1.23.2"
 clap = { version = "4.0", features = ["derive"] }
 libc = "0.2.175"
 
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-panic = "abort"
-overflow-checks = false
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "train_gpt2_cuda"
+path = "src/bin/train_gpt2_cuda.rs"
+required-features = ["cuda"]
+
+[[bin]]
+name = "test_cust_async_copy"
+path = "src/bin/test_cust_async_copy.rs"
+required-features = ["cuda"]
