@@ -2,11 +2,18 @@ pub mod dataloader;
 pub mod tokenizer;
 pub mod utils;
 pub mod random;
-pub mod common;
 pub mod scheduler;
 pub mod logger;
 pub mod sampler;
+
+#[cfg(feature = "cuda")]
+pub mod common;
+#[cfg(feature = "cuda")]
+pub mod cuda_utils;
+#[cfg(feature = "cuda")]
 pub mod cuda_launchers;
 pub mod outlier_detector;
+#[cfg(feature = "cuda")]
 pub mod gpu_monitor;
+#[cfg(feature = "cuda")]
 pub mod debug;

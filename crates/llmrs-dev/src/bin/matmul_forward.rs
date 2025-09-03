@@ -2,6 +2,7 @@ use cust::prelude::*;
 use cust::error::CudaResult;
 use llmrs_dev::common::*;
 
+#[allow(non_snake_case)]
 fn matmul_forward_cpu_rs(out: &mut [f32], inp: &[f32], weight: &[f32], bias: &[f32], B: usize, T: usize, C: usize, OC: usize) {
     // OC is short for "output channels"
     // inp is (B,T,C), weight is (OC, C), bias is (OC)
@@ -24,6 +25,7 @@ fn matmul_forward_cpu_rs(out: &mut [f32], inp: &[f32], weight: &[f32], bias: &[f
 
 // C-ABI dispatcher exported by the .cu (linked by build.rs)
 unsafe extern "C" {
+    #[allow(dead_code)]
     fn matmul_forward_cpu(
         out: *mut f32,
         inp: *const f32,

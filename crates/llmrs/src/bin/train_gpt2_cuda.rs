@@ -1,16 +1,35 @@
+#[cfg(feature = "cuda")]
 use llm_rs::common::{vec_f32_to_floatx, zero_floatx, FloatX, PrecisionMode, PRECISION_MODE, ToF32};
+#[cfg(feature = "cuda")]
 use clap::Parser;
+#[cfg(feature = "cuda")]
 use std::io::{Read, BufReader, Write};
+#[cfg(feature = "cuda")]
 use std::fs::File;
+#[cfg(feature = "cuda")]
 use std::cmp::{max, min};
-use llm_rs::utils::{find_max_step, read_le_u32_array, file_to_device, write_u64_as_i32s};
+#[cfg(feature = "cuda")]
+use llm_rs::utils::{find_max_step, read_le_u32_array, write_u64_as_i32s};
+#[cfg(feature = "cuda")]
+use llm_rs::cuda_utils::file_to_device;
+#[cfg(feature = "cuda")]
 use llm_rs::{dataloader::Dataloader, dataloader::EvalLoader, tokenizer::Tokenizer, scheduler::LearningRateScheduler};
+#[cfg(feature = "cuda")]
 use llm_rs::logger::Logger;
+#[cfg(feature = "cuda")]
 use llm_rs::sampler;
+#[cfg(feature = "cuda")]
 use llm_rs::cuda_launchers::*;
+#[cfg(feature = "cuda")]
 use llm_rs::outlier_detector::OutlierDetector;
+#[cfg(feature = "cuda")]
 use cust::{prelude::*};
+#[cfg(feature = "cuda")]
 use cust::memory::{DeviceCopy, GpuBuffer, LockedBuffer};
+
+#[cfg(feature = "cuda")]
+mod train_gpt2_cuda {
+use super::*;
 
 // Simple MultiGpuConfig struct for checkpoint functionality
 #[derive(Debug, Clone)]
@@ -456,7 +475,7 @@ impl GPT2 {
         // write the parameters
         let stream = Stream::new(StreamFlags::DEFAULT, None).unwrap();
         let buf_size = 32 * 1024 * 1024 / std::mem::size_of::<f32>(); // IO_BUF_SIZE
-        llm_rs::utils::device_to_file(&mut model_file, &self.params.memory, buf_size, &stream);
+        llm_rs::cuda_utils::device_to_file(&mut model_file, &self.params.memory, buf_size, &stream);
         
         // close file, we're done
         drop(model_file);
@@ -520,7 +539,7 @@ impl GPT2 {
 
         // read in the parameters if weight_init is true
         if weight_init {
-            llm_rs::utils::file_to_device(&mut params.memory, &mut model_file_reader, 1024, &stream);
+            llm_rs::cuda_utils::file_to_device(&mut params.memory, &mut model_file_reader, 1024, &stream);
         }
 
         // only return from this function once we are certain the params are ready on the GPU
@@ -1201,14 +1220,14 @@ fn save_state(filename: &str, step: i32, model: &GPT2, loader: &Dataloader, stre
     let buf_size = 32 * 1024 * 1024 / std::mem::size_of::<f32>(); // IO_BUF_SIZE
     
     if let Some(ref m_memory) = model.m_memory {
-        llm_rs::utils::device_to_file(&mut state_file, m_memory.as_slice(), buf_size, &stream);
+        llm_rs::cuda_utils::device_to_file(&mut state_file, m_memory.as_slice(), buf_size, &stream);
     }
     if let Some(ref v_memory) = model.v_memory {
-        llm_rs::utils::device_to_file(&mut state_file, v_memory.as_slice(), buf_size, &stream);
+        llm_rs::cuda_utils::device_to_file(&mut state_file, v_memory.as_slice(), buf_size, &stream);
     }
     if model.use_master_weights {
         if let Some(ref master_weights) = model.master_weights {
-            llm_rs::utils::device_to_file(&mut state_file, master_weights.as_slice(), buf_size, &stream);
+            llm_rs::cuda_utils::device_to_file(&mut state_file, master_weights.as_slice(), buf_size, &stream);
         }
     }
 
@@ -1470,7 +1489,7 @@ struct Args {
 }
 
 #[allow(non_snake_case)]
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     // read in the (optional) command line arguments
     let args = Args::parse();
 
@@ -1874,4 +1893,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("total average iteration time: {} ms", total_sum_iteration_time_s / (train_num_batches-1) as f32 * 1000.0);
 
     Ok(())
+}
+}
+
+#[cfg(feature = "cuda")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    train_gpt2_cuda::main()
 }

@@ -210,8 +210,8 @@ unsafe extern "C" {
 
     // CUDA utils
     fn global_sum_deterministic_float(result: *mut f32, values: *const f32, count: i32, stream: CUstream);
-    fn global_sum_deterministic_fp16(result: CUdeviceptr, values: CUdeviceptr, count: i32, stream: CUstream);
-    fn global_sum_deterministic_bf16(result: CUdeviceptr, values: CUdeviceptr, count: i32, stream: CUstream);
+    // fn global_sum_deterministic_fp16(result: CUdeviceptr, values: CUdeviceptr, count: i32, stream: CUstream);
+    // fn global_sum_deterministic_bf16(result: CUdeviceptr, values: CUdeviceptr, count: i32, stream: CUstream);
     
     // Global norm functions
     pub fn get_max_num_block_sums(num_slices_all: *const i32, numel: i32) -> i32;
@@ -221,5 +221,5 @@ unsafe extern "C" {
 
     // GELU functions
     fn gelu_forward(out: *mut FloatX, inp: *const FloatX, N: i32, stream: CUstream);
-    fn gelu_backward_inplace(d_in_out: CUdeviceptr, inp: CUdeviceptr, N: i32, stream: CUstream);
+    // fn gelu_backward_inplace(d_in_out: CUdeviceptr, inp: CUdeviceptr, N: i32, stream: CUstream);
 }
