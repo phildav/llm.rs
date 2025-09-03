@@ -1,0 +1,26 @@
+{
+    "name": "CUDA + Rust Development",
+    "image": "nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04",
+    "features": {
+      "ghcr.io/devcontainers/features/common-utils:2": {},
+      "ghcr.io/devcontainers/features/rust:1": {
+        "version": "latest",
+        "profile": "minimal",
+        "components": "rustfmt,clippy"
+      }
+    },
+    "postCreateCommand": "rustup show && cargo --version",
+    "mounts": ["source=${localWorkspaceFolder},target=/workspace,type=bind"],
+    "settings": {
+      "terminal.integrated.shell.linux": "/bin/bash"
+    },
+    "workspaceFolder": "/workspace",
+    "customizations": {
+      "vscode": {
+        "extensions": [
+          "rust-lang.rust-analyzer",
+          "ms-vscode.cpptools" // if it says "not compatible", check the setting 'download extensions locally'
+        ]
+      }
+    }
+  }
