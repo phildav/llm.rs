@@ -1,3 +1,6 @@
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::too_many_arguments)]
+
 use std::{fs::File, io::BufReader, time::Instant};
 use llm_rs::{dataloader::Dataloader, tokenizer::Tokenizer, utils::{read_fill_le_f32_array, read_le_u32_array}};
 use rayon::prelude::*;
@@ -152,13 +155,13 @@ impl GPT2 {
         //let params = GPT2::point_parameters(param_sizes, &mut params_memory);
         
         Self {
-            config: config,
-            param_sizes: param_sizes,
-            params_memory: params_memory,
+            config,
+            param_sizes,
+            params_memory,
             grads_memory: None,
             m_memory: None,
             v_memory: None,
-            num_parameters: num_parameters,
+            num_parameters,
             act_sizes: [0; NUM_ACTIVATION_TENSORS],
             acts_memory: None,
             grads_acts_memory: None,
@@ -204,7 +207,6 @@ impl GPT2 {
     }
 
     fn get_parameters(params_memory: &mut [f32], param_sizes: [usize; NUM_PARAMETER_TENSORS]) -> ParameterTensors<'_> {
-        let param_sizes = param_sizes;
         // Rust impl: use split_at_mut to avoid the usage of unsafe
 
         let (wte, rest) = params_memory.split_at_mut(param_sizes[0]);
@@ -226,22 +228,22 @@ impl GPT2 {
         debug_assert_eq!(rest.len(), 0, "Parameter buffer not fully consumed: {} elements left", rest.len());
 
         ParameterTensors {
-            wte: wte,
-            wpe: wpe,
-            ln1w: ln1w,
-            ln1b: ln1b,
-            qkvw: qkvw,
-            qkvb: qkvb,
-            attprojw: attprojw,
-            attprojb: attprojb,
-            ln2w: ln2w,
-            ln2b: ln2b,
-            fcw: fcw,
-            fcb: fcb,
-            fcprojw: fcprojw,
-            fcprojb: fcprojb,
-            lnfw: lnfw,
-            lnfb: lnfb
+            wte,
+            wpe,
+            ln1w,
+            ln1b,
+            qkvw,
+            qkvb,
+            attprojw,
+            attprojb,
+            ln2w,
+            ln2b,
+            fcw,
+            fcb,
+            fcprojw,
+            fcprojb,
+            lnfw,
+            lnfb,
         }
 
     }
@@ -315,29 +317,30 @@ impl GPT2 {
 
 
         ActivationTensors { 
-            encoded: encoded,
-            ln1: ln1,
-            ln1_mean: ln1_mean,
-            ln1_rstd: ln1_rstd,
-            qkv: qkv,
-            atty: atty,
-            preatt: preatt,
-            att: att,
-            attproj: attproj,
-            residual2: residual2,
-            ln2: ln2,
-            ln2_mean: ln2_mean,
-            ln2_rstd: ln2_rstd,
-            fch: fch,
-            fch_gelu: fch_gelu, 
-            fcproj: fcproj, 
-            residual3: residual3, 
-            lnf: lnf, 
-            lnf_mean: lnf_mean, 
-            lnf_rstd: lnf_rstd, 
-            logits: logits, 
-            probs: probs, 
-            losses: losses }
+            encoded,
+            ln1,
+            ln1_mean,
+            ln1_rstd,
+            qkv,
+            atty,
+            preatt,
+            att,
+            attproj,
+            residual2,
+            ln2,
+            ln2_mean,
+            ln2_rstd,
+            fch,
+            fch_gelu, 
+            fcproj, 
+            residual3, 
+            lnf, 
+            lnf_mean, 
+            lnf_rstd, 
+            logits, 
+            probs, 
+            losses,
+        }
     }
 
     #[allow(non_snake_case)]
@@ -380,7 +383,7 @@ impl GPT2 {
         let params = GPT2::get_parameters(params_memory, self.param_sizes);
         let mut acts = GPT2::get_activations(acts_memory, self.act_sizes);
 
-        encoder_forward(&mut acts.encoded, inputs, params.wte, params.wpe, B, T, C);
+        encoder_forward(acts.encoded, inputs, params.wte, params.wpe, B, T, C);
         for l in 0..L {
             let residual = if l == 0 { 
                 &mut acts.encoded 
@@ -477,8 +480,8 @@ impl GPT2 {
         }
 
         // convenience shortcuts
-        let B = self.batch_size as usize;
-        let T = self.seq_len as usize;
+        let B = self.batch_size;
+        let T = self.seq_len;
         let V = self.config.vocab_size;
         let Vp = self.config.padded_vocab_size;
         let L = self.config.num_layers;
@@ -693,7 +696,7 @@ fn layernorm_forward(out: &mut [f32], mean: &mut[f32], rstd: &mut[f32],
                 let xshift = i - m;
                 v += xshift * xshift;
             }
-            v = v / (C as f32);
+            v /= C as f32;
 
             // calculate the rstd (reciprocal standard deviation)
             let s = 1.0f32 / (v + eps).sqrt();

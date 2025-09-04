@@ -9,8 +9,6 @@ update the mean and variance with += on each step for efficiency. We could
 reconsider this choice in the future, as the compute cost here is minimal.
 */
 
-use std::f64::NAN;
-
 // use compile-time constant for window size to avoid dynamic memory allocations
 const OUTLIER_DETECTOR_WINDOW_SIZE: usize = 128;
 
@@ -22,8 +20,8 @@ pub struct OutlierDetector {
     sum_sq: f64,
 }
 
-impl OutlierDetector {
-    pub fn new() -> Self {
+impl Default for OutlierDetector {
+    fn default() -> Self {
         Self {
             buffer: [0.0; OUTLIER_DETECTOR_WINDOW_SIZE],
             count: 0,
@@ -32,6 +30,9 @@ impl OutlierDetector {
             sum_sq: 0.0,
         }
     }
+}
+
+impl OutlierDetector {
 
     pub fn update(&mut self, new_value: f64) -> f64 {
         if self.count < OUTLIER_DETECTOR_WINDOW_SIZE {
@@ -40,7 +41,7 @@ impl OutlierDetector {
             self.sum += new_value;
             self.sum_sq += new_value * new_value;
             self.count += 1;
-            NAN // not enough data yet
+            f64::NAN // not enough data yet
         } else {
             // we've filled the window, so now we can start detecting outliers
 
@@ -61,9 +62,8 @@ impl OutlierDetector {
             if std_dev == 0.0 {
                 return 0.0;
             }
-            let z = (new_value - mean) / std_dev;
-
-            z
+            
+            (new_value - mean) / std_dev
         }
     }
 }
@@ -80,7 +80,7 @@ mod tests {
     
     #[test]
     fn test_outlier_detector() {
-        let mut detector = OutlierDetector::new();
+        let mut detector = OutlierDetector::default();
 
         // Initialize random number generator with seed 1337
         let mut rng_seed: u32 = 1337;
@@ -101,7 +101,7 @@ mod tests {
             } else {
                 // check that the zscore is within reasonable bounds
                 assert!(
-                    zscore >= -3.0 && zscore <= 3.0,
+                    (-3.0..=3.0).contains(&zscore),
                     "Z-score {:.4} is outside of expected range",
                     zscore
                 );

@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 use std::fs::File;
 use glob::glob;
 use std::path::PathBuf;
@@ -101,7 +103,7 @@ impl Dataloader {
             let shard_ntok = dataloader.load_shard(shard_index);
             // we need at least one batch/shard, the way things are written right now.
             // can be relaxed a lot later.
-            assert!(shard_ntok >= num_processes * B * T + 1);
+            assert!(shard_ntok > num_processes * B * T);
             ntok_total += shard_ntok;
         }
         println!("DataLoader: filename_pattern: {}", file_pattern);
@@ -368,7 +370,7 @@ impl EvalLoader {
             inputs: vec![0i32; B * T], // ???
             targets: vec![0i32; B * T], // ???
             mask: vec![0u8; B * T], // ???
-            label: vec![0i32; can_fit_examples as usize],// ???
+            label: vec![0i32; can_fit_examples],// ???
             num_completions: 0, // Will be set by next_example()
         };
         
@@ -596,8 +598,8 @@ mod tests {
         // Verify the saved state has the correct values
         assert_eq!(shuffling_state.total_files, dataloader.files.len());
         assert_eq!(shuffling_state.shard_num_samples, dataloader.shard_num_samples);
-        assert!(shuffling_state.shard_indices.len() > 0);
-        assert!(shuffling_state.intra_shard_indices.len() > 0);
+        assert!(!shuffling_state.shard_indices.is_empty());
+        assert!(!shuffling_state.intra_shard_indices.is_empty());
         
         // Create a new dataloader and restore the state
         let mut new_dataloader = Dataloader::new("../../dev/data/tinyshakespeare/*.bin", 4, 8, false);

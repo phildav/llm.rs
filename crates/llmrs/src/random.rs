@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 use rand_mt::Mt;
 use std::f32::consts::PI;
 
@@ -110,9 +112,7 @@ pub fn random_permutation(data: &mut [usize], numel: usize, rng: &mut Mt19937) {
         // pick an index j in [0, i] with equal probability
         let j = rng.randu32() as usize %  (i + 1);
         // swap i <-> j
-        let tmp = data[i];
-        data[i] = data[j];
-        data[j] = tmp;
+        data.swap(i, j);
     }
 }
 
@@ -142,7 +142,7 @@ unsafe impl bytemuck::Pod for CMt19937State {}
 unsafe impl bytemuck::Zeroable for CMt19937State {}
 
 impl CMt19937State {
-    pub fn default() -> Self {
+    pub fn empty() -> Self {
         Self {
             seed_: 0,
             left_: 0,
@@ -259,17 +259,18 @@ mod tests {
         normal_(&mut t8, 0.0, 1.0, &mut rng);
         
         let expected_t8 = [
-            0.7947664260864258f32,
-            1.4369317293167114f32,
-            -0.2292192131280899f32,
-            0.47556325793266296f32,
-            -0.6334410905838013f32,
-            -0.5791953802108765f32,
-            -0.0925704762339592f32,
-            -0.8659197092056274f32,
+            0.7947664260864258f64,
+            1.4369317293167114f64,
+            -0.2292192131280899f64,
+            0.47556325793266296f64,
+            -0.6334410905838013f64,
+            -0.5791953802108765f64,
+            -0.0925704762339592f64,
+            -0.8659197092056274f64,
         ];
         
-        for (i, &exp) in expected_t8.iter().enumerate() {
+        for (i, &exp_f64) in expected_t8.iter().enumerate() {
+            let exp = exp_f64 as f32;
             assert!((t8[i] - exp).abs() < 1e-6, "t8[{}]: expected {}, got {}", i, exp, t8[i]);
         }
         
@@ -282,25 +283,26 @@ mod tests {
         normal_(&mut t16, 0.0, 1.0, &mut rng);
         
         let expected_t16 = [
-            -1.2813878059387207f32,
-            -2.646395683288574f32,
-            -0.06569503247737885f32,
-            0.2180829495191574f32,
-            -0.46536165475845337f32,
-            -0.33108410239219666f32,
-            2.5485482215881348f32,
-            0.10425379872322083f32,
-            0.8460659980773926f32,
-            0.9462448358535767f32,
-            -0.2913765013217926f32,
-            0.34313806891441345f32,
-            -1.1186704635620117f32,
-            -0.18305328488349915f32,
-            -2.3153159618377686f32,
-            0.3961987793445587f32,
+            -1.2813878059387207f64,
+            -2.646395683288574f64,
+            -0.06569503247737885f64,
+            0.2180829495191574f64,
+            -0.46536165475845337f64,
+            -0.33108410239219666f64,
+            2.5485482215881348f64,
+            0.10425379872322083f64,
+            0.8460659980773926f64,
+            0.9462448358535767f64,
+            -0.2913765013217926f64,
+            0.34313806891441345f64,
+            -1.1186704635620117f64,
+            -0.18305328488349915f64,
+            -2.3153159618377686f64,
+            0.3961987793445587f64,
         ];
         
-        for (i, &exp) in expected_t16.iter().enumerate() {
+        for (i, &exp_f64) in expected_t16.iter().enumerate() {
+            let exp = exp_f64 as f32;
             assert!((t16[i] - exp).abs() < 1e-6, "t16[{}]: expected {}, got {}", i, exp, t16[i]);
         }
         

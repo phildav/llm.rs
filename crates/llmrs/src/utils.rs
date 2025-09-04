@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 use std::io::BufRead;
 use std::fs;
 use std::path::Path;
@@ -27,7 +29,7 @@ pub fn read_le_u32_array<R: BufRead, const N: usize>(reader: &mut R) -> [u32; N]
     resp
 }
 
-pub fn read_fill_le_f32_array<R: BufRead>(reader: &mut R, array: &mut Vec<f32>) {
+pub fn read_fill_le_f32_array<R: BufRead>(reader: &mut R, array: &mut [f32]) {
     let mut buf = [0u8; 4];
 
     for i in 0..array.len() {
@@ -36,7 +38,7 @@ pub fn read_fill_le_f32_array<R: BufRead>(reader: &mut R, array: &mut Vec<f32>) 
     }
 }
 
-pub fn read_fill_le_u16_array<R: BufRead>(reader: &mut R, array: &mut Vec<u16>) {
+pub fn read_fill_le_u16_array<R: BufRead>(reader: &mut R, array: &mut [u16]) {
     let mut buf = [0u8; 2];
 
     for i in 0..array.len() {
