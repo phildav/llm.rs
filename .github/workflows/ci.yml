@@ -43,7 +43,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: test (${{ matrix.os }} / ${{ matrix.toolchain }})
+    name: test (${{ matrix.os }} / toolchain: ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -52,11 +52,26 @@ jobs:
         toolchain: [stable, beta]
     steps:
       - uses: actions/checkout@v4
+
+      # Install Rust
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
 
+      # Prepare training data
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run preprocessing
+        run: python dev/data/tinyshakespeare.py
+
+      # Build and test
       - name: Build
         run: cargo build --workspace --locked
       - name: Test
