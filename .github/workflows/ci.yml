@@ -18,9 +18,32 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  # --- CPU-only tests on all OSes (no CUDA) ---
-  cpu-tests:
-    name: CPU tests (${{ matrix.os }} / ${{ matrix.toolchain }})
+  fmt:
+    name: rustfmt check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Run rustfmt
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }} / ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -32,17 +55,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      # fmt & clippy
-      - name: rustfmt --check
-        run: cargo fmt --all -- --check
-      - name: clippy (workspace)
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      # Build & test
-      - name: Build (no features)
+      - name: Build
         run: cargo build --workspace --locked
-      - name: Test (no features)
+      - name: Test
         run: cargo test --workspace --all-targets --locked
