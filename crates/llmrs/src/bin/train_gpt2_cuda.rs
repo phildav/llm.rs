@@ -176,7 +176,6 @@ impl ParameterTensorsSizes {
 }
 
 // the parameters of the model
-pub const NUM_ACTIVATION_TENSORS: usize = 21;
 pub const NUM_ACTIVATION_TENSORS_FLOATX: usize = 14;
 pub const NUM_ACTIVATION_TENSORS_FLOAT: usize = 7;
 
