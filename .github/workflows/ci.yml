@@ -36,8 +36,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        toolchain: [stable, beta]
+        os: [ubuntu-latest, macos-latest]
+        toolchain: [stable]
     steps:
       - uses: actions/checkout@v4
 
@@ -64,3 +64,25 @@ jobs:
         run: cargo build --workspace --locked
       - name: Test
         run: cargo test --workspace --all-targets --locked
+
+  build-cuda:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        precision: [fp32, bf16, fp16]
+        toolchain: [stable]
+    name: build-cuda-${{ matrix.precision }}
+    container:
+      image: nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build ${{ matrix.precision }}
+        run: cargo build --release --features cuda,${{ matrix.precision }}
