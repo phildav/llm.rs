@@ -70,13 +70,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-      include:
-        - precision: fp32
-          features: "cuda"          # default precision, no fp32 feature
-        - precision: bf16
-          features: "cuda,bf16"
-        - precision: fp16
-          features: "cuda,fp16"
+        include:
+          - precision: fp32
+            features: "cuda"          # default precision, no fp32 feature
+          - precision: bf16
+            features: "cuda,bf16"
+          - precision: fp16
+            features: "cuda,fp16"
     name: build-cuda-${{ matrix.precision }}
     container:
       image: nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04
