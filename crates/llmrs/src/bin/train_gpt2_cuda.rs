@@ -1685,8 +1685,8 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // init an OutlierDetector the training loss
-    let mut loss_outlier_detector = OutlierDetector::new();
-    let mut grad_norm_outlier_detector = OutlierDetector::new();
+    let mut loss_outlier_detector = OutlierDetector::default();
+    let mut grad_norm_outlier_detector = OutlierDetector::default();
 
     // do some checks here before we kick off training
     // cross-check the desired sequence length T with the model's max sequence length
