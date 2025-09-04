@@ -43,7 +43,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: test (${{ matrix.os }} / toolchain: ${{ matrix.toolchain }})
+    name: test (${{ matrix.os }} / toolchain ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
