@@ -215,8 +215,11 @@ unsafe extern "C" {
     
     // Global norm functions
     pub fn get_max_num_block_sums(num_slices_all: *const i32, numel: i32) -> i32;
+    #[cfg(all(not(feature = "bf16"), not(feature = "fp16")))] 
     fn global_norm_squared_float(out: CUdeviceptr, values: CUdeviceptr, count: usize, stride: isize, num_slices: i32, max_num_block_sums: i32, reset: bool, stream: CUstream);
+    #[cfg(feature = "fp16")]
     fn global_norm_squared_fp16(out: CUdeviceptr, values: CUdeviceptr, count: usize, stride: isize, num_slices: i32, max_num_block_sums: i32, reset: bool, stream: CUstream);
+    #[cfg(feature = "bf16")]
     fn global_norm_squared_bf16(out: CUdeviceptr, values: CUdeviceptr, count: usize, stride: isize, num_slices: i32, max_num_block_sums: i32, reset: bool, stream: CUstream);
 
     // GELU functions

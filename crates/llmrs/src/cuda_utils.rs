@@ -1,4 +1,4 @@
-use std::io::{BufRead, Read, Write};
+use std::io::{Read, Write};
 
 use cust::memory::DeviceCopy;
 use cust::{
