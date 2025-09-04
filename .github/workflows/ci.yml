@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # Install Rust
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
@@ -70,8 +70,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        precision: [fp32, bf16, fp16]
-        toolchain: [stable]
+      include:
+        - precision: fp32
+          features: "cuda"          # default precision, no fp32 feature
+        - precision: bf16
+          features: "cuda,bf16"
+        - precision: fp16
+          features: "cuda,fp16"
     name: build-cuda-${{ matrix.precision }}
     container:
       image: nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04
@@ -82,9 +87,7 @@ jobs:
       - name: Install curl
         run: apt-get update && apt-get install -y curl
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
 
       - name: Build ${{ matrix.precision }}
-        run: cargo build --release --features cuda,${{ matrix.precision }}
+        run: cargo build --release --features ${{ matrix.features }} --locked
