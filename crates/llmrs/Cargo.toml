@@ -30,8 +30,3 @@ path = "src/lib.rs"
 name = "train_gpt2_cuda"
 path = "src/bin/train_gpt2_cuda.rs"
 required-features = ["cuda"]
-
-[[bin]]
-name = "test_cust_async_copy"
-path = "src/bin/test_cust_async_copy.rs"
-required-features = ["cuda"]

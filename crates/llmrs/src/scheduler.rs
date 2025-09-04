@@ -32,34 +32,30 @@ impl LearningRateScheduler {
 
     /// cosine: warmup linearly to max LR, then cosine decay to LR * final_learning_rate_frac
     pub fn get_learning_rate_cosine(&self, step: i32) -> f32 {
-        let lr;
         if step < self.warmup_iterations {
-            lr = self.learning_rate * ((step + 1) as f32) / self.warmup_iterations as f32;
+            self.learning_rate * ((step + 1) as f32) / self.warmup_iterations as f32
         } else {
             let decay_ratio = ((step - self.warmup_iterations) as f32) 
                 / (self.train_num_batches - self.warmup_iterations) as f32;
-            assert!(0.0 <= decay_ratio && decay_ratio <= 1.0);
+            assert!((0.0..=1.0).contains(&decay_ratio));
             let coeff = 0.5 * (1.0 + (PI * decay_ratio).cos()); // coeff starts at 1 and goes to 0
-            assert!(0.0 <= coeff && coeff <= 1.0);
+            assert!((0.0..=1.0).contains(&coeff));
             let min_lr = self.learning_rate * self.final_learning_rate_frac;
-            lr = min_lr + coeff * (self.learning_rate - min_lr);
+            min_lr + coeff * (self.learning_rate - min_lr)
         }
-        lr
     }
 
     /// linear: warmup linearly to max LR, then decay linearly to LR * final_learning_rate_frac
     pub fn get_learning_rate_linear(&self, step: i32) -> f32 {
-        let lr ;
         if step < self.warmup_iterations {
-            lr = self.learning_rate * ((step + 1) as f32) / self.warmup_iterations as f32;
+            self.learning_rate * ((step + 1) as f32) / self.warmup_iterations as f32
         } else {
             let decay_ratio = ((step - self.warmup_iterations) as f32) 
                 / (self.train_num_batches - self.warmup_iterations) as f32;
-            assert!(0.0 <= decay_ratio && decay_ratio <= 1.0);
+            assert!((0.0..=1.0).contains(&decay_ratio));
             let min_lr = self.learning_rate * self.final_learning_rate_frac;
-            lr = self.learning_rate - decay_ratio * (self.learning_rate - min_lr);
+            self.learning_rate - decay_ratio * (self.learning_rate - min_lr)
         }
-        lr
     }
 
     /// wsd schedule: warmup linearly, keep constant, last 20% decay using 1 - sqrt decay to final_frac (should be 0.0)
@@ -82,7 +78,7 @@ impl LearningRateScheduler {
             // noop, keep lr constant
         } else {
             let decay_ratio = ((step - decay_point) as f32) / (self.train_num_batches - decay_point) as f32;
-            debug_assert!(0.0 <= decay_ratio && decay_ratio <= 1.0);
+            debug_assert!((0.0..=1.0).contains(&decay_ratio));
             let min_lr = max_lr * self.final_learning_rate_frac;
             return min_lr + (1.0 - decay_ratio.sqrt()) * (max_lr - min_lr);
         }

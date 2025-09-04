@@ -13,15 +13,13 @@ impl Logger {
     pub fn init(log_dir: Option<&str>, process_rank: i32, resume: bool) -> io::Result<Self> {
         let mut logger = Logger { active: false, output_log_file: PathBuf::new() };
 
-        if let Some(dir) = log_dir {
-            if process_rank == 0 {
-                logger.active = true;
-                logger.output_log_file = Path::new(dir).join("main.log");
+        if let Some(dir) = log_dir && process_rank == 0 {
+            logger.active = true;
+            logger.output_log_file = Path::new(dir).join("main.log");
 
-                if !resume {
-                    // wipe
-                    File::create(&logger.output_log_file)?; // truncate or create
-                }
+            if !resume {
+                // wipe
+                File::create(&logger.output_log_file)?; // truncate or create
             }
         }
         Ok(logger)

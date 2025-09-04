@@ -176,7 +176,6 @@ impl ParameterTensorsSizes {
 }
 
 // the parameters of the model
-pub const NUM_ACTIVATION_TENSORS: usize = 21;
 pub const NUM_ACTIVATION_TENSORS_FLOATX: usize = 14;
 pub const NUM_ACTIVATION_TENSORS_FLOAT: usize = 7;
 
@@ -1301,7 +1300,7 @@ fn load_state(step: &mut i32, model: &mut GPT2, loader: &mut Dataloader, filenam
         state_file.read_exact(bytemuck::cast_slice_mut(&mut [shard_num_samples])).unwrap();
         let mut intra_shard_indices = vec![0i32; shard_num_samples];
         state_file.read_exact(bytemuck::cast_slice_mut(&mut intra_shard_indices)).unwrap();
-        let c_mt19937_state = llm_rs::random::CMt19937State::default();
+        let c_mt19937_state = llm_rs::random::CMt19937State::empty();
         state_file.read_exact(bytemuck::cast_slice_mut(&mut [c_mt19937_state])).unwrap();
         // Restore the random generator state from the C struct
         let restored_rng = llm_rs::random::from_c_state(&c_mt19937_state);
@@ -1685,8 +1684,8 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // init an OutlierDetector the training loss
-    let mut loss_outlier_detector = OutlierDetector::new();
-    let mut grad_norm_outlier_detector = OutlierDetector::new();
+    let mut loss_outlier_detector = OutlierDetector::default();
+    let mut grad_norm_outlier_detector = OutlierDetector::default();
 
     // do some checks here before we kick off training
     // cross-check the desired sequence length T with the model's max sequence length
