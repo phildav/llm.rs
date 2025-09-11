@@ -1,19 +1,21 @@
-# llm.rs
+# llm.rs 🦀
 
-A Rust port of Karpathy's [llm.c](https://github.com/karpathy/llm.c) - a pure C/CUDA LLM implementation focused on pretraining, and in particular reproducing the [GPT-2](https://github.com/openai/gpt-2) and [GPT-3](https://arxiv.org/abs/2005.14165) miniseries.
+A Rust port of Karpathy's [llm.c](https://github.com/karpathy/llm.c) - an LLM implementation focused on pretraining, and in particular reproducing the [GPT-2](https://github.com/openai/gpt-2) and [GPT-3](https://arxiv.org/abs/2005.14165) miniseries.
 
-llm.rs is an educational project, in the spirit of llm.c but in **safe and idiomatic Rust**. llm.rs demonstrates how Rust's safety and performance apply to an LLM training loop. The CPU and GPU paths remain close to the C/CUDA originals to ease learning and benchmarking. Training results are **bit-exact with the reference implementation**.
+Rust is focused on performance and reliability, so I found it particularly interesting to see how these principles apply to an LLM training loop.
 
-## 🦀 Rust Safety
+llm.rs is an educational project, in the spirit of llm.c but in Rust, where I tried to write code as **safe and idiomatic** as possible. The CPU and GPU paths remain close to the C/CUDA originals to ease learning and benchmarking. Training results are **bit-exact with the reference implementation**.
+
+##  🔐 Rust Safety 
 
 Rust enforces memory safety, thread safety, and data race prevention mostly at compile time, preserving runtime performance.
 
-The CPU implementation [train_gpt2_cuda.rs](crates/llmrs/src/bin/train_gpt2.rs) is 100% safe Rust (no `unsafe` block).
+The CPU implementation [train_gpt2.rs](crates/llmrs/src/bin/train_gpt2.rs) is 100% safe Rust (no `unsafe` block).
  - A notable difference with C is the usage of sized arrays instead of pointers, preventing out-of-bounds access.
  - Shared buffers (parameters, activations, gradients) are split with `split_at_mut()` to satisfy the borrow checker and prevent aliasing (multiple mutable references to the same memory location).
   - Importantly, these checks have **minimal performance cost**, check the [performance section](#rust-vs-c-performances)
 
-## CUDA with Rust
+## ⚡️ CUDA with Rust
 
 The CUDA implementation [train_gpt2_cuda.rs](crates/llmrs/src/bin/train_gpt2_cuda.rs) is using [cust](https://docs.rs/cust/latest/cust/), a light wrapper around the CUDA Driver API. This keeps the CUDA code from llm.c almost unchanged.
 
@@ -21,7 +23,7 @@ The CUDA implementation [train_gpt2_cuda.rs](crates/llmrs/src/bin/train_gpt2_cud
  - The CUDA kernels in (crates/llmrs/cuda) are still compiled with `nvcc`.
  - Rust manages GPU memory allocation with RAII cleanup.
 
-## Rust vs C performances
+## 📊 Rust vs C performances
 
 ### CPU Single Thread
 
@@ -43,11 +45,13 @@ The CUDA implementation [train_gpt2_cuda.rs](crates/llmrs/src/bin/train_gpt2_cud
 
 ### GPU
 
-Both implementation run the same kernels, so we expect minimal difference.
+The GPU kernels are the same in both implementations, so we expect minimal difference.
+
+This chart shows the kernel run times, but to be honest I found that the overall loop was slower in Rust, this needs to be investigated.
 
 ![](doc/gpu_training_time.png "GPU")
 
-## Getting started
+## ⚙️ Getting started
 
 
 ### Prerequisites
@@ -62,7 +66,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ### With NVIDIA GPU
 
-Build with CUDA + BF16 support:
+With an NVIDIA GPU and CUDA installed, you can build directly with CUDA + BF16 support:
 
 ```bash
 cargo build --release --features cuda,bf16
@@ -84,11 +88,15 @@ cargo run --release --features cuda,bf16 --bin train_gpt2_cuda
 
 ### Without NVIDIA GPU (Mac & others)
 
-This project ships with a `devcontainer.json` for CUDA + Rust development.  
-For example, in Cursor:  
-`Cmd + Shift + P` → **Dev Container: Rebuild and Reopen in Container**.
+Fortunately it is also possible to develop without an NVIDIA GPU on your local computer. This is what I need with devcontainer and modal.com.
 
-To actually run CUDA training, you’ll need cloud GPUs. One option is [modal.com](https://modal.com/docs/guide#getting-started):
+With devcontainer, part of your IDE is running inside a container. This project ships with a `devcontainer.json` that pulls a CUDA enabled image + Rust. Thus you can make the IDE linting work as expected and build the project locally.
+
+To use it in Cursor for instance:
+`Cmd + Shift + P` → **Dev Container: Rebuild and Reopen in Container**.
+This opens a new Cursor window on the project in which you can develop as usual and build.
+
+Then to actually run CUDA training or tests with CUDA, you will need a GPU. One option is [modal.com](https://modal.com/docs/guide#getting-started):
 
 1. Create a Modal account.  
 2. Install Python package:  
@@ -109,7 +117,11 @@ modal run run_on_modal.py --command "cargo run --features cuda,bf16 --release --
 
 The [run_on_modal.py](run_on_modal.py) script defaults to an NVIDIA L4 instance.
 
----
+## 📝 Todo
+
+- [ ] Measure the complete GPU training loop timings. Rust should not be slower - FFI call overhead is too low for that.
+- [ ] Automate the bit-exact comparison with the reference implementation in CI
+- [ ] Improve Rust idiomatic style — I’m sure this can still be refined.
 
 ## license
 
