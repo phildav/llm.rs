@@ -1,9 +1,18 @@
+//! Educational port of `train_gpt2.c` to Rust that parallelizes work with Rayon.
+//!
+//! This variant keeps the original tensor layout and AdamW optimizer but fans out
+//! forward/backward computation across CPU threads via Rayon
+
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::too_many_arguments)]
 
 use std::{fs::File, io::BufReader, time::Instant};
 use llm_rs::{dataloader::Dataloader, tokenizer::Tokenizer, utils::{read_fill_le_f32_array, read_le_u32_array}};
 use rayon::prelude::*;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+const LAYERNORM_EPS: f32 = 1e-5;
 
 
 #[derive(Debug)]
@@ -97,24 +106,25 @@ struct GPT2 {
     seq_len: usize, // the sequence length (T) of current forward pass
     inputs: Option<Vec<i32>>, // the input tokens for the current forward pass
     targets: Option<Vec<i32>>, // the target tokens for the current forward pass
-    mean_loss: f32, // after a forward pass with targets, will be populated with the mean loss
+    mean_loss: Option<f32>, // after a forward pass with targets, will be populated with the mean loss
 }
 
 
 impl GPT2 {
 
     #[allow(non_snake_case)]
-    pub fn build_from_checkpoint(checkpoint_path: &str) -> Self {
+    pub fn build_from_checkpoint(checkpoint_path: &str) -> Result<Self> {
 
         let model_file = File::open(checkpoint_path)
-        .unwrap_or_else(|_| panic!("Error: cannot open file {:?}", checkpoint_path));
+            .map_err(|e| format!("Error: cannot open file {:?}: {}", checkpoint_path, e))?;
         let mut model_file_reader = BufReader::new(model_file);
         let model_header: [u32; 256] = read_le_u32_array::<_, 256>(&mut model_file_reader);
-        if model_header[0] != 20240326 { panic!("Bad magic model file"); }
+        if model_header[0] != 20240326 {
+            return Err("Bad magic model file".into());
+        }
         if model_header[1] != 3 {
-            print!("Bad version in model file");
-            print!("---> HINT: try to re-run `python train_gpt2.py");
-            panic!();
+            return Err("Bad version in model file\n\
+                 ---> HINT: try to re-run `python train_gpt2.py`".into());
         }
 
         // read in hyperparameters
@@ -154,7 +164,7 @@ impl GPT2 {
         read_fill_le_f32_array(&mut model_file_reader, &mut params_memory);
         //let params = GPT2::point_parameters(param_sizes, &mut params_memory);
         
-        Self {
+        Ok(Self {
             config,
             param_sizes,
             params_memory,
@@ -169,8 +179,8 @@ impl GPT2 {
             seq_len: 0,
             inputs: None,
             targets: None,
-            mean_loss: -1.0  // -1.0f will designate no loss
-        }
+            mean_loss: None
+        })
 
 
     }
@@ -449,10 +459,10 @@ impl GPT2 {
                 crossentropy_forward(acts.losses, acts.probs, targets, B, T, Vp);
                 let mut mean_loss = acts.losses.iter().sum::<f32>();
                 mean_loss /= (B*T) as f32;
-                self.mean_loss = mean_loss;
+                self.mean_loss = Some(mean_loss);
             },
             None => {
-                self.mean_loss = -1.0;
+                self.mean_loss = None;
             }
         }
 
@@ -468,9 +478,9 @@ impl GPT2 {
     }
 
     #[allow(non_snake_case)]
-    fn backward(&mut self) {
-        if self.mean_loss == -1.0 {
-            panic!("Error: must forward with targets before backward");
+    fn backward(&mut self) -> Result<()> {
+        if self.mean_loss.is_none() {
+            return Err("Error: must forward with targets before backward".into());
         }
 
         // lazily allocate the memory for gradients of the weights and activations, if needed
@@ -512,7 +522,8 @@ impl GPT2 {
         let dloss_mean = 1.0 / ((B*T) as f32);
         for i in 0..B*T { grads_acts.losses[i] = dloss_mean;}
 
-        crossentropy_softmax_backward(grads_acts.logits, grads_acts.losses, acts.probs, self.targets.as_ref().unwrap(), B, T, V, Vp);
+        let targets = self.targets.as_ref().ok_or("Targets unavailable in backward pass")?;
+        crossentropy_softmax_backward(grads_acts.logits, grads_acts.losses, acts.probs, targets, B, T, V, Vp);
         matmul_backward(grads_acts.lnf, grads.wte, None, grads_acts.logits, acts.lnf, params.wte, B, T, C, Vp);
         let residual = &acts.residual3[(L-1)*B*T*C ..]; // last layer's residual
         let dresidual= &mut grads_acts.residual3[(L-1)*B*T*C ..];  // write to last layer's residual
@@ -590,7 +601,9 @@ impl GPT2 {
             layernorm_backward(dresidual, dl_ln1w, dl_ln1b, dl_ln1, residual, l_ln1w, l_ln1_mean, l_ln1_rstd, B, T, C); 
             
         }
-        encoder_backward(grads.wte, grads.wpe, grads_acts.encoded, self.inputs.as_ref().unwrap(), B, T, C);
+        let inputs = self.inputs.as_ref().ok_or("Inputs unavailable in backward pass")?;
+        encoder_backward(grads.wte, grads.wpe, grads_acts.encoded, inputs, B, T, C);
+        Ok(())
     }
 
     fn update(&mut self, learning_rate: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32, t: u32) {
@@ -627,7 +640,7 @@ impl GPT2 {
 }
 
 #[allow(non_snake_case)]
-fn encoder_forward(out: &mut [f32], inp: &[i32], wte: &mut[f32], wpe: &mut[f32], B: usize, T: usize, C: usize) {
+fn encoder_forward(out: &mut [f32], inp: &[i32], wte: &[f32], wpe: &[f32], B: usize, T: usize, C: usize) {
     // out is (B,T,C). At each position (b,t), a C-dimensional vector summarizing token & position
     // inp is (B,T) of integers, holding the token ids at each (b,t) position
     // wte is (V,C) of token embeddings, short for "weight token embeddings"
@@ -680,7 +693,6 @@ fn layernorm_forward(out: &mut [f32], mean: &mut[f32], rstd: &mut[f32],
     // at each position (b,t) of the input, the C-dimensional vector
     // of activations gets normalized, then scaled and shifted
 
-    let eps = 1e-5f32;
     for b in 0..B {
         for t in 0..T {
             // seek to the input position inp[b,t,:]
@@ -699,7 +711,7 @@ fn layernorm_forward(out: &mut [f32], mean: &mut[f32], rstd: &mut[f32],
             v /= C as f32;
 
             // calculate the rstd (reciprocal standard deviation)
-            let s = 1.0f32 / (v + eps).sqrt();
+            let s = 1.0f32 / (v + LAYERNORM_EPS).sqrt();
 
             // seek to the output position in out[b,t,:]
             for i in 0..C {
@@ -767,7 +779,7 @@ fn matmul_forward_unroll_rayon(out: &mut [f32],
                                B: usize, T: usize, C: usize, OC: usize) {
     const LOOP_UNROLL: usize = 8;
     let BT = B * T;
-    if BT % LOOP_UNROLL != 0 {
+    if !BT.is_multiple_of(LOOP_UNROLL) {
         panic!("cannot use LOOP_UNROLL on BT={}", BT);
     }
 
@@ -875,7 +887,7 @@ fn attention_forward(out: &mut [f32], preatt: &mut [f32], att: &mut [f32],
                 let att_bth = &mut att[b*NH*T*T + h*T*T + t*T .. ];
 
                 // pass 1: calculate query dot key and maxval
-                let mut maxval = -10000.0f32; // TODO something better
+                let mut maxval = f32::NEG_INFINITY;
                 for t2 in 0..=t {
                     let key_t2 = &inp[b*T*C3 + t2*C3 + h*hs + C .. ];  // +C because it's key
 
@@ -1055,7 +1067,7 @@ fn softmax_forward(probs: &mut [f32], logits: &[f32], B: usize, T: usize, V: usi
             let probs_bt = &mut probs[b*T*Vp + t*Vp .. ];
 
             // maxval is only calculated and subtracted for numerical stability
-            let mut maxval = -10000.0; // TODO something better
+            let mut maxval = f32::NEG_INFINITY;
             for i in 0..V {
                 if logits_bt[i] > maxval {
                     maxval = logits_bt[i];
@@ -1141,8 +1153,8 @@ fn sample_mult(probabilities: &[f32], coin: f32) -> i32 {
 
 // main training loop
 #[allow(non_snake_case)]
-fn main() {
-    let mut model= GPT2::build_from_checkpoint("gpt2_124M.bin");
+fn main() -> Result<()> {
+    let mut model = GPT2::build_from_checkpoint("gpt2_124M.bin")?;
 
     // build the DataLoaders from tokens files. for now use tiny_shakespeare if available, else tiny_stories
     let tiny_stories_train = "dev/data/tinystories/TinyStories_train.bin";
@@ -1180,7 +1192,7 @@ fn main() {
             for _ in 0..val_num_batches {
                 val_loader.next_batch();
                 model.forward(val_loader.inputs(), Some(val_loader.targets()), B, T);
-                val_loss += model.mean_loss;
+                val_loss += model.mean_loss.unwrap_or(0.0);
             }
             val_loss /= val_num_batches as f32;
             println!("val loss {}", val_loss);
@@ -1225,12 +1237,13 @@ fn main() {
         train_loader.next_batch();
         model.forward(train_loader.inputs(), Some(train_loader.targets()), B, T);
         model.zero_grad();
-        model.backward();
+        model.backward()?;
         model.update(1e-4, 0.9, 0.999, 1e-8, 0.0, step+1);
         let end = Instant::now();
         let elapsed = end - start;
-        println!("step {}: train loss {} (took {:?} ms)", step, model.mean_loss, elapsed.as_millis());        
+        println!("step {}: train loss {} (took {:?} ms)", step, model.mean_loss.unwrap_or(0.0), elapsed.as_millis());
     }
 
 
+    Ok(())
 }
