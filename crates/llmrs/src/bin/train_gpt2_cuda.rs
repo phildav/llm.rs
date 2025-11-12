@@ -1,35 +1,31 @@
+//! Educational port of `train_gpt2.cu` to Rust that targets CUDA GPUs.
+//!
+//! The binary mirrors `train_gpt2.rs`’s training loop but offloads tensor math,
+//! attention, and optimizer routines to CUDA kernels.
+
 #[cfg(feature = "cuda")]
-use llm_rs::common::{vec_f32_to_floatx, zero_floatx, FloatX, PrecisionMode, PRECISION_MODE, ToF32};
-#[cfg(feature = "cuda")]
-use clap::Parser;
-#[cfg(feature = "cuda")]
-use std::io::{Read, BufReader, Write};
-#[cfg(feature = "cuda")]
-use std::fs::File;
-#[cfg(feature = "cuda")]
-use std::cmp::{max, min};
-#[cfg(feature = "cuda")]
-use llm_rs::utils::{find_max_step, read_le_u32_array, write_u64_as_i32s};
-#[cfg(feature = "cuda")]
-use llm_rs::cuda_utils::file_to_device;
-#[cfg(feature = "cuda")]
-use llm_rs::{dataloader::Dataloader, dataloader::EvalLoader, tokenizer::Tokenizer, scheduler::LearningRateScheduler};
-#[cfg(feature = "cuda")]
-use llm_rs::logger::Logger;
-#[cfg(feature = "cuda")]
-use llm_rs::sampler;
-#[cfg(feature = "cuda")]
-use llm_rs::cuda_launchers::*;
-#[cfg(feature = "cuda")]
-use llm_rs::outlier_detector::OutlierDetector;
-#[cfg(feature = "cuda")]
-use cust::{prelude::*};
-#[cfg(feature = "cuda")]
-use cust::memory::{DeviceCopy, GpuBuffer, LockedBuffer};
+use {
+    llm_rs::common::{vec_f32_to_floatx, zero_floatx, FloatX, PrecisionMode, PRECISION_MODE, ToF32},
+    clap::Parser,
+    std::io::{Read, BufReader, Write},
+    std::fs::File,
+    std::cmp::{max, min},
+    llm_rs::utils::{find_max_step, read_le_u32_array, write_u64_as_i32s},
+    llm_rs::cuda_utils::file_to_device,
+    llm_rs::{dataloader::Dataloader, dataloader::EvalLoader, tokenizer::Tokenizer, scheduler::LearningRateScheduler},
+    llm_rs::logger::Logger,
+    llm_rs::sampler,
+    llm_rs::cuda_launchers::*,
+    llm_rs::outlier_detector::OutlierDetector,
+    cust::prelude::*,
+    cust::memory::{DeviceCopy, GpuBuffer, LockedBuffer},
+};
 
 #[cfg(feature = "cuda")]
 mod train_gpt2_cuda {
 use super::*;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 // Simple MultiGpuConfig struct for checkpoint functionality
 #[derive(Debug, Clone)]
@@ -363,7 +359,7 @@ struct GPT2 {
     seq_len: usize, // the sequence length (T) of current forward pass
     inputs: Option<DeviceBuffer<i32>>, // the input tokens for the current forward pass
     targets: Option<DeviceBuffer<i32>>, // the target tokens for the current forward pass
-    mean_loss: f32,  // after the last backward micro-batch, will be populated with mean loss across all GPUs and micro-steps
+    mean_loss: Option<f32>,  // after the last backward micro-batch, will be populated with mean loss across all GPUs and micro-steps
 
     accumulated_mean_loss: Option<DeviceVariable<f32>>,  // GPU buffer used to accumulate loss across micro-steps
     cpu_losses: Option<LockedBuffer<f32>>, // CPU buffer to copy the losses to, allocated with cudaMallocHost
@@ -448,11 +444,11 @@ impl GPT2 {
 
     }
 
-    pub fn write_checkpoint(&self, checkpoint_path: &str) {
+    pub fn write_checkpoint(&self, checkpoint_path: &str) -> Result<()> {
         // write the model to a checkpoint file
         println!("Writing model to {}", checkpoint_path);
         let mut model_file = File::create(checkpoint_path)
-            .unwrap_or_else(|_| panic!("Error: cannot create file {:?}", checkpoint_path));
+            .map_err(|e| format!("Error: cannot create file {:?}: {}", checkpoint_path, e))?;
         
         // write the header first
         let mut model_header = [0u32; 256];
@@ -468,57 +464,66 @@ impl GPT2 {
         
         // Write header as little-endian u32 array
         for &value in &model_header {
-            model_file.write_all(&value.to_le_bytes()).unwrap();
+            model_file.write_all(&value.to_le_bytes())?;
         }
-        
+
         // write the parameters
-        let stream = Stream::new(StreamFlags::DEFAULT, None).unwrap();
+        let stream = Stream::new(StreamFlags::DEFAULT, None)?;
         let buf_size = 32 * 1024 * 1024 / std::mem::size_of::<f32>(); // IO_BUF_SIZE
         llm_rs::cuda_utils::device_to_file(&mut model_file, &self.params.memory, buf_size, &stream);
-        
+
         // close file, we're done
         drop(model_file);
+        Ok(())
     }
 
     /// Build GPT2 model from a checkpoint file
-    pub fn from_checkpoint(checkpoint_path: &str, weight_init: bool, stream: &Stream) -> Self {
+    pub fn from_checkpoint(checkpoint_path: &str, weight_init: bool, stream: &Stream) -> Result<Self> {
         // If weight_init is true, we will load the weights from this checkpoint .bin file
         // We sometimes want this to be false, if we are going to initialize these weights from
         // the master weights that are instead stored in the state .bin file.
         // In that case, this function mostly loads the model hyperparameters from the header.
 
         if PRECISION_MODE == PrecisionMode::Fp16 {
-             panic!("build_from_checkpoint() does not support fp16 right now.");
+            return Err("build_from_checkpoint() does not support fp16 right now.".into());
         }
 
         // read in model from a checkpoint file
         let model_file = File::open(checkpoint_path)
-            .unwrap_or_else(|_| panic!("Error: cannot open file {:?}", checkpoint_path));
+            .map_err(|e| format!("Error: cannot open file {:?}: {}", checkpoint_path, e))?;
         let mut model_file_reader = BufReader::new(model_file);
         let model_header: [u32; 256] = read_le_u32_array::<_, 256>(&mut model_file_reader);
-        if model_header[0] != 20240326 { panic!("Bad magic model file"); }
-        
+
+        if model_header[0] != 20240326 {
+            return Err("Bad magic model file".into());
+        }
+
         let version = model_header[1];
         if !(version == 3 || version == 5) {
             // 3 = fp32, padded vocab
             // 5 = bf16, padded vocab, layernorms also in bf16
-            eprintln!("Bad version in model file");
-            eprintln!("---> HINT: try to re-run `python train_gpt2.py`");
-            panic!();
+            return Err(format!(
+                "Bad version in model file\n\
+                 ---> HINT: try to re-run `python train_gpt2.py`"
+            ).into());
         }
 
         // check if the precision mode of the checkpoint matches the model precision
         if weight_init {
             if PRECISION_MODE == PrecisionMode::Bf16 && version != 5 {
-                eprintln!("Precision is configured as BF16 but model at {} is not.", checkpoint_path);
-                eprintln!("---> HINT: are you sure you're loading a _bf16.bin file?");
-                panic!();
+                return Err(format!(
+                    "Precision is configured as BF16 but model at {} is not.\n\
+                     ---> HINT: are you sure you're loading a _bf16.bin file?",
+                    checkpoint_path
+                ).into());
             }
             if PRECISION_MODE == PrecisionMode::Fp32 && version != 3 {
-                eprintln!("Precision is configured as FP32 but model at {} is not.", checkpoint_path);
-                eprintln!("---> HINT: to turn on FP32 you have to compile like: `make train_gpt2cu PRECISION=FP32`");
-                eprintln!("---> HINT: are you sure you're loading a .bin file without any _bf16 in the name?");
-                panic!();
+                return Err(format!(
+                    "Precision is configured as FP32 but model at {} is not.\n\
+                     ---> HINT: to turn on FP32 you have to compile like: `make train_gpt2cu PRECISION=FP32`\n\
+                     ---> HINT: are you sure you're loading a .bin file without any _bf16 in the name?",
+                    checkpoint_path
+                ).into());
             }
         }
 
@@ -542,9 +547,9 @@ impl GPT2 {
         }
 
         // only return from this function once we are certain the params are ready on the GPU
-        stream.synchronize().unwrap();
+        stream.synchronize()?;
 
-        Self {
+        Ok(Self {
             config: config,
             params: params,
             grads: None,
@@ -557,7 +562,7 @@ impl GPT2 {
             seq_len: 0,
             inputs: None,
             targets: None,
-            mean_loss: -1.0, // -1.0 designates no loss
+            mean_loss: None, // None indicates no loss computed yet
             accumulated_mean_loss: None,
             cpu_losses: None,
             rng_state: 13371337, // used in stochastic rounding  // TODO + multi_gpu_config.process_rank;
@@ -568,10 +573,10 @@ impl GPT2 {
             recompute: 1, // good default: recompute gelu but not layernorm
             workload_indices: None,
             bucket_info: None,
-        }
+        })
     }
 
-    fn parse_gpt2_hyperparameters(depth_str: &str) -> Result<GPT2Config, String> {
+    fn parse_gpt2_hyperparameters(depth_str: &str) -> Result<GPT2Config> {
         let depth: usize = depth_str.parse().map_err(|_| "Invalid depth (not a number)".to_string())?;
 
         let (channels, num_heads) = match depth {
@@ -583,7 +588,7 @@ impl GPT2 {
             60 => (1920, 30),   // (unofficial) 2.7B
             72 => (2880, 30),   // (unofficial) 7.3B
             84 => (3456, 36),   // (unofficial) 12.2B
-            _  => return Err(format!("Unsupported GPT-2 depth: {}", depth)),
+            _  => return Err(format!("Unsupported GPT-2 depth: {}", depth).into()),
         };
         
         Ok(GPT2Config {
@@ -596,7 +601,7 @@ impl GPT2 {
         })
     }
 
-    fn parse_gpt3_hyperparameters(channels_str: &str) -> Result<GPT2Config, String> {
+    fn parse_gpt3_hyperparameters(channels_str: &str) -> Result<GPT2Config> {
         let channels: usize = channels_str.parse().map_err(|_| "invalid GPT-3 channels".to_string())?;
 
         let (depth, head_size) = match channels {
@@ -609,10 +614,10 @@ impl GPT2 {
             4096   => (32, 128),  // gpt3-6.7B
             5140   => (40, 128),  // gpt3-13B
             12288  => (96, 128),  // gpt3 (175B)
-            _ => return Err(format!("unsupported GPT-3 channels: {}", channels)),
+            _ => return Err(format!("unsupported GPT-3 channels: {}", channels).into()),
         };
         if channels % head_size != 0 {
-            return Err(format!("channels {} not divisible by head size {}", channels, head_size));
+            return Err(format!("channels {} not divisible by head size {}", channels, head_size).into());
         }
         
         Ok(GPT2Config {
@@ -715,7 +720,7 @@ impl GPT2 {
             seq_len: 0,
             inputs: None,
             targets: None,
-            mean_loss: -1.0,
+            mean_loss: None,
             accumulated_mean_loss: None,
             cpu_losses: None,
             rng_state: 13371337,
@@ -1043,16 +1048,13 @@ impl GPT2 {
         if last_step {
             // reduce all the losses within the current GPU (across all microsteps)
             k_global_sum_deterministic_float(&mut self.accumulated_mean_loss.as_mut().unwrap(), &acts.losses, B*T, stream);
-            
-            self.accumulated_mean_loss.as_mut().unwrap().copy_dtoh().unwrap();
-            self.mean_loss = **self.accumulated_mean_loss.as_ref().unwrap();
-            //TODO multi GPU
-        }
 
-        if last_step {
-            self.mean_loss /= (B*T*grad_accum_steps) as f32;
+            self.accumulated_mean_loss.as_mut().unwrap().copy_dtoh().unwrap();
+            let loss_value = **self.accumulated_mean_loss.as_ref().unwrap();
+            self.mean_loss = Some(loss_value / (B*T*grad_accum_steps) as f32);
+            //TODO multi GPU
         } else {
-            self.mean_loss = -1.0f32; // no loss available yet
+            self.mean_loss = None; // no loss available yet
         }
         
     }
@@ -1321,15 +1323,15 @@ fn load_state(step: &mut i32, model: &mut GPT2, loader: &mut Dataloader, filenam
 
 
 // Write checkpoint function that mirrors the C version
-fn write_checkpoint(output_log_dir: &str, step: i32, model: &GPT2, train_loader: &Dataloader, multi_gpu_config: &MultiGpuConfig, stream: &Stream) {
+fn write_checkpoint(output_log_dir: &str, step: i32, model: &GPT2, train_loader: &Dataloader, multi_gpu_config: &MultiGpuConfig, stream: &Stream) -> Result<()> {
     // a checkpoint contains: model weights, optimizer/dataloader state, and a DONE file
     println!("Writing checkpoint at step {}", step);
     let rank = multi_gpu_config.process_rank;
-    
+
     // only rank 0 writes the model file because it is the same across all ranks
     if rank == 0 {
         let model_filename = format!("{}/model_{:08}.bin", output_log_dir, step);
-        model.write_checkpoint(&model_filename);
+        model.write_checkpoint(&model_filename)?;
     }
     
     // all ranks write their state file
@@ -1340,8 +1342,10 @@ fn write_checkpoint(output_log_dir: &str, step: i32, model: &GPT2, train_loader:
     // multi_gpu_barrier(multi_gpu_config);
     if rank == 0 {
         let done_filename = format!("{}/DONE_{:08}", output_log_dir, step);
-        let _done_file = File::create(&done_filename).expect("Failed to create DONE file");
+        File::create(&done_filename)
+            .map_err(|e| format!("Failed to create DONE file: {}", e))?;
     }
+    Ok(())
 }
 
 // Delete checkpoint function
@@ -1488,7 +1492,7 @@ struct Args {
 }
 
 #[allow(non_snake_case)]
-pub fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub fn main() -> Result<()> {
     // read in the (optional) command line arguments
     let args = Args::parse();
 
@@ -1574,10 +1578,10 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         // if `-y 1` was set, then we are resuming from the latest checkpoint
         // if we are using master weights, we'll init them later inside load_state()
         let weight_init = !args.use_master_weights;
-        GPT2::from_checkpoint(&filename_buffer, weight_init, &stream)
+        GPT2::from_checkpoint(&filename_buffer, weight_init, &stream)?
     } else if args.load_filename.ends_with(".bin") {
         // otherwise, if this is a .bin file, we assume it's a model, let's init from it
-        GPT2::from_checkpoint(&args.load_filename, true, &stream)
+        GPT2::from_checkpoint(&args.load_filename, true, &stream)?
     } else {
         // if it's not .bin, it could be a "special descriptor". This descriptor is used to
         // construct GPT-2 / GPT-3 models in a convenient format. See the function for docs.
@@ -1802,7 +1806,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("write checkpoint");
             // writes model .bin file, state .bin files, and DONE file for step
             let output_log_dir = args.output_log_dir.as_ref().unwrap();
-            write_checkpoint(output_log_dir, step, &model, &train_loader, &multi_gpu_config, &stream);
+            write_checkpoint(output_log_dir, step, &model, &train_loader, &multi_gpu_config, &stream)?;
             // we only keep checkpoints_keep checkpoints on disk to save space
             // so now that we wrote a new checkpoint, delete one old one (unless it is a "major" checkpoint)
             // we only do this is checkpoint keeping is turned on (checkpoints_keep > 0)
@@ -1835,7 +1839,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
             // backward pass. all model params accumulate gradients with += inside this inner loop
             model.backward_and_reduce(train_loader.inputs(), train_loader.targets(), grad_accum_steps as usize, micro_step as usize, &stream);
         }
-        let zloss = loss_outlier_detector.update(model.mean_loss as f64) as f32; // loss z-score
+        let zloss = loss_outlier_detector.update(model.mean_loss.unwrap_or(0.0) as f64) as f32; // loss z-score
         // fetch the next learning rate
         let step_learning_rate = lr_scheduler.get_learning_rate(step);
         // calculate the gradient norm and how much we wish to scale the gradient
@@ -1870,7 +1874,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let mfu = model.estimate_mfu(B * T * grad_accum_steps as usize, time_elapsed_ms / 1000.0f32);
         println!("step {:4}/{} | loss {:7.6} ({:+2}z)| norm {:6.4} ({:+2}z)| lr {:.2e} | {:.2} ms | {:.1}% bf16 MFU | {:.0} tok/s",
-                step + 1, train_num_batches, model.mean_loss, zloss, grad_norm, zgrad, step_learning_rate,
+                step + 1, train_num_batches, model.mean_loss.unwrap_or(0.0), zloss, grad_norm, zgrad, step_learning_rate,
                 time_elapsed_ms, 100.0*mfu, bias_corrected_ema_tokens_per_second);
         if args.log_gpu_every > 0 && (step + 1) % args.log_gpu_every == 0 {
             if let Ok(gpu_info) = llm_rs::gpu_monitor::get_gpu_utilization_info() {
@@ -1881,7 +1885,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("                  Failed to get GPU utilization info");
             }
         }
-        logger.log_train(step, model.mean_loss, step_learning_rate, grad_norm)?;
+        logger.log_train(step, model.mean_loss.unwrap_or(0.0), step_learning_rate, grad_norm)?;
 
         // disable the profiler after 3 steps of optimization
         if step == 3 { 
