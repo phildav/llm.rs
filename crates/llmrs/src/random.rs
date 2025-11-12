@@ -65,7 +65,7 @@ pub fn normal_fill(data: &mut [f32], mean: f32, std: f32, rng: &mut Mt19937) {
     }
     
     // Handle remaining elements if numel % 16 != 0
-    if numel % 16 != 0 {
+    if !numel.is_multiple_of(16) {
         let start = numel - 16;
         // Recompute the last 16 values
         for i in 0..16 {
