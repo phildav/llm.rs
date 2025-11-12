@@ -587,7 +587,7 @@ mod tests {
         println!("Current directory: {}", env::current_dir().unwrap().display());
 
         // Create a simple dataloader with shuffling enabled
-        let dataloader = Dataloader::new("../../dev/data/tinyshakespeare/*.bin", 4, 8, true);
+        let dataloader = Dataloader::new("../dev/data/tinyshakespeare/*.bin", 4, 8, true);
         
         // Save the shuffling state
         let saved_state = dataloader.save_shuffling_state();
@@ -602,7 +602,7 @@ mod tests {
         assert!(!shuffling_state.intra_shard_indices.is_empty());
         
         // Create a new dataloader and restore the state
-        let mut new_dataloader = Dataloader::new("../../dev/data/tinyshakespeare/*.bin", 4, 8, false);
+        let mut new_dataloader = Dataloader::new("../dev/data/tinyshakespeare/*.bin", 4, 8, false);
         new_dataloader.resume_shuffling(shuffling_state);
         
         // Verify the state was restored correctly
@@ -615,7 +615,7 @@ mod tests {
     #[test]
     fn test_shuffling_state_no_shuffle() {
         // Create a dataloader without shuffling
-        let dataloader = Dataloader::new("../../dev/data/tinyshakespeare/*.bin", 4, 8, false);
+        let dataloader = Dataloader::new("../dev/data/tinyshakespeare/*.bin", 4, 8, false);
         
         // Try to save shuffling state - should return None
         let saved_state = dataloader.save_shuffling_state();

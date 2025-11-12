@@ -10,17 +10,17 @@ llm.rs is an educational project, in the spirit of llm.c but in Rust, where I tr
 
 Rust enforces memory safety, thread safety, and data race prevention mostly at compile time, preserving runtime performance.
 
-The CPU implementation [train_gpt2.rs](crates/llmrs/src/bin/train_gpt2.rs) is 100% safe Rust (no `unsafe` block).
+The CPU implementation [train_gpt2.rs](llmrs/src/bin/train_gpt2.rs) is 100% safe Rust (no `unsafe` block).
  - A notable difference with C is the usage of sized arrays instead of pointers, preventing out-of-bounds access.
  - Shared buffers (parameters, activations, gradients) are split with `split_at_mut()` to satisfy the borrow checker and prevent aliasing (multiple mutable references to the same memory location).
   - Importantly, these checks have **minimal performance cost**, check the [performance section](#rust-vs-c-performances)
 
 ## ⚡️ CUDA with Rust
 
-The CUDA implementation [train_gpt2_cuda.rs](crates/llmrs/src/bin/train_gpt2_cuda.rs) is using [cust](https://docs.rs/cust/latest/cust/), a light wrapper around the CUDA Driver API. This keeps the CUDA code from llm.c almost unchanged.
+The CUDA implementation [train_gpt2_cuda.rs](llmrs/src/bin/train_gpt2_cuda.rs) is using [cust](https://docs.rs/cust/latest/cust/), a light wrapper around the CUDA Driver API. This keeps the CUDA code from llm.c almost unchanged.
 
- - The kernel launchers are exposed in [cuda_launchers.rs](crates/llmrs/src/cuda_launchers.rs) where most `unsafe` blocks happen.
- - The CUDA kernels in (crates/llmrs/cuda) are still compiled with `nvcc`.
+ - The kernel launchers are exposed in [cuda_launchers.rs](llmrs/src/cuda_launchers.rs) where most `unsafe` blocks happen.
+ - The CUDA kernels in (llmrs/cuda) are still compiled with `nvcc`.
  - Rust manages GPU memory allocation with RAII cleanup.
 
 ## 📊 Rust vs C performances
@@ -39,7 +39,7 @@ The CUDA implementation [train_gpt2_cuda.rs](crates/llmrs/src/bin/train_gpt2_cud
 
 - llm.c uses OpenMP for multithreading (minimal code changes).  
 - In Rust, **the closest equivalent is [Rayon](https://docs.rs/rayon/latest/rayon/)**.
-- Rayon is lightweight but requires more code changes, so a dedicated loop was added in [train_gpt2_rayon.rs](crates/llmrs/src/bin/train_gpt2_rayon.rs).
+- Rayon is lightweight but requires more code changes, so a dedicated loop was added in [train_gpt2_rayon.rs](llmrs/src/bin/train_gpt2_rayon.rs).
 
 ![](doc/cpu_training_multithread.png "CPU training multi thread")
 
