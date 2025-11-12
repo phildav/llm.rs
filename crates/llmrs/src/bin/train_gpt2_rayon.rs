@@ -123,10 +123,8 @@ impl GPT2 {
             return Err("Bad magic model file".into());
         }
         if model_header[1] != 3 {
-            return Err(format!(
-                "Bad version in model file\n\
-                 ---> HINT: try to re-run `python train_gpt2.py`"
-            ).into());
+            return Err("Bad version in model file\n\
+                 ---> HINT: try to re-run `python train_gpt2.py`".into());
         }
 
         // read in hyperparameters
@@ -781,7 +779,7 @@ fn matmul_forward_unroll_rayon(out: &mut [f32],
                                B: usize, T: usize, C: usize, OC: usize) {
     const LOOP_UNROLL: usize = 8;
     let BT = B * T;
-    if BT % LOOP_UNROLL != 0 {
+    if !BT.is_multiple_of(LOOP_UNROLL) {
         panic!("cannot use LOOP_UNROLL on BT={}", BT);
     }
 
