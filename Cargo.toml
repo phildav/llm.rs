@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/llmrs", "crates/llmrs-dev"]
+members = ["llmrs", "dev/llmrs-dev"]
 resolver = "2"
 
 [profile.release]
